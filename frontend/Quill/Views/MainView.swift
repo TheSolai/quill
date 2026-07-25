@@ -7,6 +7,7 @@ struct MainView: View {
     @ObservedObject private var panel = PanelState.shared
 
     @State private var sidebarWidth: CGFloat = 240
+    @State private var aiWidth: CGFloat = 360
     @State private var newProjectName = ""
     @State private var showNewChapter = false
     @State private var newChapterName = ""
@@ -103,10 +104,30 @@ struct MainView: View {
                         .frame(height: panel.height)
                     }
                 }
+
+                // Right: AI Assistant (fixed side panel, always visible)
+                AIAssistantView(
+                    state: state,
+                    bg: bgSecondary,
+                    bgPrimary: bgPrimary,
+                    accent: accent,
+                    accentDim: accentDim,
+                    textPrimary: textPrimary,
+                    textSecondary: textSecondary,
+                    textMuted: textMuted,
+                    border: border,
+                    width: aiWidth
+                )
+                .frame(width: aiWidth)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .background(bgPrimary)
-            .onAppear { panel.clampHeight(for: geo.size.height) }
+            .onAppear {
+                panel.clampHeight(for: geo.size.height)
+                // Make sure everything is visible on start
+                panel.isVisible = true
+                panel.hiddenTabIds = []
+            }
             .onChange(of: geo.size.height) { _, h in panel.clampHeight(for: h) }
         }
         .ignoresSafeArea()
@@ -160,23 +181,16 @@ struct MainView: View {
         // Register each tab with the panel registry. Each builder takes the
         // AppState and returns an AnyView. Theme colors come from MainView's
         // stored properties.
+        // Note: the Assistant is on the right side as a fixed panel, not a
+        // bottom-panel tab.
         let bg = bgSecondary
         let bgP = bgPrimary
         let ac = accent
-        let acD = accentDim
         let tP = textPrimary
         let tS = textSecondary
         let tM = textMuted
         let br = border
 
-        PanelTabRegistry.shared.register("assistant") { state in
-            AnyView(AIAssistantView(
-                state: state,
-                bg: bg, bgPrimary: bgP, accent: ac, accentDim: acD,
-                textPrimary: tP, textSecondary: tS, textMuted: tM, border: br,
-                width: 0
-            ))
-        }
         PanelTabRegistry.shared.register("terminal") { state in
             AnyView(TerminalTab(
                 state: state,

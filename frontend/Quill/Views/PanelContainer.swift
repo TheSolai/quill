@@ -186,8 +186,18 @@ struct PanelBody: View {
     let accent: Color
 
     var body: some View {
-        PanelTabRegistry.shared.view(for: panel.currentTabId, state: state)
-            .id(panel.currentTabId)  // remount on tab switch
+        // Stack all tabs on top of each other with opacity-based visibility.
+        // This means every tab's view is created on first panel render, so
+        // the terminal's command history, the inbox, and the logs are all
+        // ready the moment the user opens the app — no blank first-click
+        // experience.
+        ZStack {
+            ForEach(panel.visibleTabs) { tab in
+                PanelTabRegistry.shared.view(for: tab.id, state: state)
+                    .opacity(panel.currentTabId == tab.id ? 1 : 0)
+                    .allowsHitTesting(panel.currentTabId == tab.id)
+            }
+        }
     }
 }
 

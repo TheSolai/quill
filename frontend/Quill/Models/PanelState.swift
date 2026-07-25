@@ -15,19 +15,14 @@ final class PanelState: ObservableObject {
     static let shared = PanelState()
 
     @Published var isVisible: Bool = true
-    @Published var currentTabId: String = "assistant"
+    @Published var currentTabId: String = "terminal"
     @Published var height: CGFloat = 320
-    @Published var hiddenTabIds: Set<String> = []
+    @Published var hiddenTabIds: Set<String> = []  // all tabs visible by default
 
     /// All tabs that can appear in the bottom panel, in display order.
     /// Hidden tabs are filtered out when building the tab bar.
+    /// The Assistant is on the right side as a fixed panel, not here.
     let allTabs: [PanelTabDescriptor] = [
-        PanelTabDescriptor(
-            id: "assistant",
-            title: "Assistant",
-            icon: "sparkles",
-            isVisibleByDefault: true
-        ),
         PanelTabDescriptor(
             id: "terminal",
             title: "Terminal",
@@ -44,7 +39,7 @@ final class PanelState: ObservableObject {
             id: "logs",
             title: "Logs",
             icon: "doc.text.below.ecg",
-            isVisibleByDefault: false
+            isVisibleByDefault: true
         ),
     ]
 
