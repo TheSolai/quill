@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0207E21D6633358F5797FFAA /* LLMSlotProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D2B19E18DA3A6ADD0F7204E /* LLMSlotProvider.swift */; };
 		078D1842CDFA10FD8E5BF72C /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 754B2F597668B5D2B8025A9C /* AppDelegate.swift */; };
 		2689C04289489540FB58E602 /* ExportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB7E1C953A0793130D869C33 /* ExportView.swift */; };
 		42387E640DDEC9B914B85410 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF31C8EE91FDE72C86EE086E /* SettingsView.swift */; };
@@ -30,6 +31,7 @@
 		0B33DFFA0DED693954E250BB /* AIAssistantView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIAssistantView.swift; sourceTree = "<group>"; };
 		0DBE22D21ADC2F0225DF0411 /* Quill.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Quill.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		14AE5830E09AB7B1FFAB59BB /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		1D2B19E18DA3A6ADD0F7204E /* LLMSlotProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMSlotProvider.swift; sourceTree = "<group>"; };
 		5161E45303B642C95F0C2431 /* LLMProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMProvider.swift; sourceTree = "<group>"; };
 		60F819DF97C48799DA43D12E /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		754B2F597668B5D2B8025A9C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -108,6 +110,7 @@
 			children = (
 				75A7451BF983B67A99CB5387 /* BackendService.swift */,
 				5161E45303B642C95F0C2431 /* LLMProvider.swift */,
+				1D2B19E18DA3A6ADD0F7204E /* LLMSlotProvider.swift */,
 				0A32FD7AC085DC7FBD13EA0A /* ProcessManager.swift */,
 			);
 			path = Services;
@@ -212,6 +215,7 @@
 				2689C04289489540FB58E602 /* ExportView.swift in Sources */,
 				55D0AD0E1FC0A25D8CD53987 /* Extensions.swift in Sources */,
 				746AB2CAD9464D64A2E852A2 /* LLMProvider.swift in Sources */,
+				0207E21D6633358F5797FFAA /* LLMSlotProvider.swift in Sources */,
 				70F995D321C92B3F52160D5F /* MainView.swift in Sources */,
 				DCBEAC585750BEEF0C2EB93D /* Models.swift in Sources */,
 				4864771C9407B77053F91C98 /* ProcessManager.swift in Sources */,

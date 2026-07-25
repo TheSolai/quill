@@ -27,6 +27,10 @@ projects/
 *.bin
 *.safetensors
 
+# Slot manager runtime state (slots.yaml IS committed as the default source)
+models/.active_slot
+models/.no_migrate
+
 # IDE
 .vscode/
 .idea/

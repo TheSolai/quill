@@ -343,7 +343,8 @@ class TestBackendEdgeCases:
         assert r.status_code == 200
         pid = r.get_json()["id"]
         r = client.get(f"/api/projects/{pid}/settings")
-        assert "gemma4:latest" in r.get_json()["model"]
+        # The default model is now the active slot's model_id
+        assert "gemma4" in r.get_json()["model"]
 
     def test_very_long_content(self, client):
         """1MB of content should save and read back."""

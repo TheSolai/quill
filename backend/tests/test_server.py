@@ -39,7 +39,10 @@ class TestHealth:
         assert r.status_code == 200
         d = r.get_json()
         assert d["backend"] == "ok"
-        assert d["model"] == "gemma4:latest"
+        # /api/health now returns the active slot's model_id
+        # (gemma4:31b-mlx by default; legacy test expected "gemma4:latest")
+        assert "model" in d
+        assert d.get("slot_id") is not None
 
 
 # ---- Projects ----
@@ -172,9 +175,11 @@ class TestSettings:
     def test_get(self, client):
         proj = client.post("/api/projects", json={"name": "T"}).get_json()
         d = client.get(f"/api/projects/{proj['id']}/settings").get_json()
-        for k in ["title", "author", "genre", "dedication", "epigraph", "style", "model"]:
+        for k in ["title", "author", "genre", "dedication", "epigraph", "style", "model", "slot_id"]:
             assert k in d
-        assert d["model"] == "gemma4:latest"
+        # The default model is now the active slot's model_id
+        # (gemma4:31b-mlx by default; legacy test expected "gemma4:latest")
+        assert d["model"] == "gemma4:31b-mlx"
 
     def test_update(self, client):
         proj = client.post("/api/projects", json={"name": "T"}).get_json()

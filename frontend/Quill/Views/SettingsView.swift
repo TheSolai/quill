@@ -20,6 +20,9 @@ struct SettingsView: View {
     @State private var style: String = ""
     @State private var isSaving: Bool = false
     @State private var saveMessage: String = ""
+    @ObservedObject private var slotRegistry = LLMSlotRegistry.shared
+    @State private var testingSlotId: String? = nil
+    @State private var testResults: [String: String] = [:]  // slotId → "✓ 245ms" / "✗ error"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -99,6 +102,56 @@ struct SettingsView: View {
 
                     Divider().background(border)
 
+                    sectionHeader("AI Model Slot")
+                    Text("Switch between local models (Ollama, MLX) and cloud models (MiniMax). The active slot powers the AI Assistant and book writer.")
+                        .font(.system(size: 11))
+                        .foregroundColor(textMuted)
+                        .padding(.horizontal, 4)
+
+                    if slotRegistry.isLoading {
+                        HStack {
+                            ProgressView().scaleEffect(0.6).frame(width: 14, height: 14)
+                            Text("Loading slots…")
+                                .font(.system(size: 11))
+                                .foregroundColor(textMuted)
+                        }
+                        .padding(.horizontal, 4)
+                    } else if let err = slotRegistry.lastError {
+                        Text("⚠️ \(err)")
+                            .font(.system(size: 10))
+                            .foregroundColor(.orange)
+                            .padding(.horizontal, 4)
+                    }
+
+                    ForEach(slotRegistry.slots) { slot in
+                        slotButton(slot: slot)
+                    }
+
+                    HStack {
+                        Button(action: {
+                            Task { await slotRegistry.load() }
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.clockwise").font(.system(size: 10))
+                                Text("Refresh slots").font(.system(size: 11))
+                            }
+                            .foregroundColor(accent)
+                        }
+                        .buttonStyle(.plain)
+
+                        Spacer()
+
+                        if let err = slotRegistry.lastError {
+                            Text(err)
+                                .font(.system(size: 9))
+                                .foregroundColor(.red)
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.horizontal, 4)
+
+                    Divider().background(border)
+
                     sectionHeader("Project")
                     if let project = appState.currentProject {
                         HStack {
@@ -152,7 +205,10 @@ struct SettingsView: View {
         }
         .frame(width: 560, height: 620)
         .background(bgPrimary)
-        .onAppear { loadSettings() }
+        .onAppear {
+            loadSettings()
+            Task { await LLMSlotRegistry.shared.load() }
+        }
     }
 
     private func sectionHeader(_ title: String) -> some View {
@@ -228,18 +284,135 @@ struct SettingsView: View {
                 } else {
                     Image(systemName: "circle")
                         .font(.system(size: 14))
-                        .foregroundColor(border)
+                        .foregroundColor(textMuted)
                 }
             }
-            .padding(12)
-            .background(LLMRegistry.shared.selectedProviderId == provider.id ? accent.opacity(0.1) : bgSecondary)
-            .cornerRadius(6)
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(LLMRegistry.shared.selectedProviderId == provider.id ? accent.opacity(0.08) : Color.clear)
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
                     .stroke(LLMRegistry.shared.selectedProviderId == provider.id ? accent.opacity(0.4) : border, lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
+    }
+
+    /// Renders one slot row with type icon, name, model id, and a test button.
+    private func slotButton(slot: LLMSlot) -> some View {
+        let isActive = slotRegistry.activeSlotId == slot.id
+        return Button(action: {
+            Task { await slotRegistry.setActive(slot.id) }
+        }) {
+            HStack(spacing: 12) {
+                Image(systemName: iconForSlot(slot.type))
+                    .font(.system(size: 16))
+                    .foregroundColor(isActive ? accent : textMuted)
+                    .frame(width: 20)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(slot.name)
+                            .font(.system(size: 13, weight: isActive ? .bold : .medium))
+                            .foregroundColor(isActive ? textPrimary : textSecondary)
+                        if slot.isDefault {
+                            Text("DEFAULT")
+                                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(accent.opacity(0.2))
+                                .foregroundColor(accent)
+                                .cornerRadius(3)
+                        }
+                    }
+                    HStack(spacing: 6) {
+                        Text(slot.modelId)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(textMuted)
+                        Text("·")
+                            .font(.system(size: 10))
+                            .foregroundColor(textMuted)
+                        Text(slot.type)
+                            .font(.system(size: 10))
+                            .foregroundColor(textMuted)
+                        if let purpose = slot.purpose, purpose != "general" {
+                            Text("·")
+                                .font(.system(size: 10))
+                                .foregroundColor(textMuted)
+                            Text(purpose)
+                                .font(.system(size: 10))
+                                .foregroundColor(textMuted)
+                        }
+                    }
+                    if let meta = slot.metadata?["notes"]?.value as? String, !meta.isEmpty {
+                        Text(meta)
+                            .font(.system(size: 9))
+                            .foregroundColor(textMuted)
+                            .lineLimit(1)
+                    }
+                    if let result = testResults[slot.id] {
+                        Text(result)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(result.hasPrefix("✓") ? .green : .red)
+                    }
+                }
+
+                Spacer()
+
+                if testingSlotId == slot.id {
+                    ProgressView().scaleEffect(0.5).frame(width: 16, height: 16)
+                } else {
+                    Button(action: {
+                        Task {
+                            testingSlotId = slot.id
+                            let r = await slotRegistry.test(slot.id)
+                            testResults[slot.id] = r.ok
+                                ? "✓ \(Int(r.latencyMs))ms"
+                                : "✗ \(r.error ?? "fail")"
+                            testingSlotId = nil
+                        }
+                    }) {
+                        Image(systemName: "bolt")
+                            .font(.system(size: 11))
+                            .foregroundColor(textMuted)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if isActive {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(accent)
+                } else {
+                    Image(systemName: "circle")
+                        .font(.system(size: 14))
+                        .foregroundColor(textMuted)
+                }
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isActive ? accent.opacity(0.08) : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(isActive ? accent.opacity(0.4) : border, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func iconForSlot(_ type: String) -> String {
+        switch type {
+        case "ollama": return "server.rack"
+        case "mlx": return "cpu"
+        case "minimax": return "cloud"
+        case "lmstudio": return "desktopcomputer"
+        case "custom": return "wrench.and.screwdriver"
+        default: return "questionmark.circle"
+        }
     }
 
     private func iconForProvider(_ id: String) -> String {

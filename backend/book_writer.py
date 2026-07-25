@@ -15,6 +15,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 BASE = "http://127.0.0.1:5323"
 OLLAMA = "http://127.0.0.1:11434"
 
+# Slot manager integration. book_writer.py can target either:
+#   - A specific slot (via --slot / --research-slot): full slot config used
+#   - The active slot: what's currently selected in the Swift app
+#   - A bare model_id (legacy): direct Ollama call (backward compat)
+import sys as _bw_sys
+_MODELS_DIR = Path(__file__).parent.parent / "models"
+if str(_MODELS_DIR) not in _bw_sys.path:
+    _bw_sys.path.insert(0, str(_MODELS_DIR))
+try:
+    import slots as _bw_slots
+    import slot_providers as _bw_providers
+    _HAS_SLOTS = True
+except ImportError:
+    _HAS_SLOTS = False
+
 def req(method, path, body=None):
     url = BASE + path
     data = json.dumps(body).encode() if body is not None else None
@@ -72,6 +87,52 @@ def ollama_generate_streaming(model, prompt, system=None, options=None):
                     break
             except json.JSONDecodeError:
                 pass
+
+
+def _resolve_provider(model_or_slot_id: str):
+    """If model_or_slot_id matches a slot, return its provider.
+    Otherwise return None (caller should fall back to direct Ollama)."""
+    if not _HAS_SLOTS:
+        return None
+    slot = _bw_slots.get_slot(model_or_slot_id)
+    if slot:
+        try:
+            return _bw_providers.get_provider(slot)
+        except Exception as e:
+            print(f"  ⚠️  slot {slot.id!r} failed to init provider: {e}, falling back to Ollama")
+            return None
+    return None
+
+
+def slot_aware_generate(model_or_slot_id, prompt, system=None, options=None):
+    """Generate text. Uses the slot manager if model_or_slot_id is a slot id,
+    otherwise falls back to direct Ollama (legacy)."""
+    provider = _resolve_provider(model_or_slot_id)
+    if provider is not None:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        # Merge slot options with runtime options
+        if options:
+            return provider.chat(messages, **options)
+        return provider.chat(messages)
+    return ollama_generate(model_or_slot_id, prompt, system, options)
+
+
+def slot_aware_stream(model_or_slot_id, prompt, system=None, options=None):
+    """Stream text. Uses the slot manager if model_or_slot_id is a slot id,
+    otherwise falls back to direct Ollama (legacy)."""
+    provider = _resolve_provider(model_or_slot_id)
+    if provider is not None:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        kwargs = options or {}
+        yield from provider.stream(messages, **kwargs)
+        return
+    yield from ollama_generate_streaming(model_or_slot_id, prompt, system, options)
 
 # ---- Prompts (reused) ----
 
@@ -190,7 +251,7 @@ def write_one_chapter(args, project_id, c, research, prior_summary, prior_excerp
 
     tokens = []
     t0 = time.time()
-    for token in ollama_generate_streaming(
+    for token in slot_aware_stream(
         args.writing_model, prompt, system=compose_system_prompt("prose"),
         options={"temperature": 0.9, "top_p": 0.92, "num_ctx": 8192}
     ):
@@ -212,8 +273,15 @@ def main():
     parser.add_argument("--style", default="literary, vivid, atmospheric")
     parser.add_argument("--genre", default="literary fiction")
     parser.add_argument("--chapters", type=int, default=15)
-    parser.add_argument("--research-model", default="qwen3:30b")
-    parser.add_argument("--writing-model", default="gemma4:31b")
+    parser.add_argument("--research-model", default="qwen3:14b",
+                        help="Model id (legacy, Ollama) OR slot id (new, slot manager)")
+    parser.add_argument("--writing-model", default="gemma4-mlx",
+                        help="Model id (legacy, Ollama) OR slot id (new, slot manager). "
+                             "Default 'gemma4-mlx' uses the local MLX slot.")
+    parser.add_argument("--slot", default=None,
+                        help="Override the writing slot (e.g., 'minimax-text' for cloud)")
+    parser.add_argument("--research-slot", default=None,
+                        help="Override the research/outline slot")
     parser.add_argument("--parallel", type=int, default=2,
                         help="How many chapters to write in parallel")
     parser.add_argument("--output-dir", default="~/Projects/Quill/output")
@@ -221,6 +289,37 @@ def main():
     parser.add_argument("--word-target", type=int, default=1500,
                         help="Target words per chapter")
     args = parser.parse_args()
+
+    # Resolve slot-based model selection
+    # Priority: --slot/--research-slot > --writing-model/--research-model as slot id > legacy model_id
+    if _HAS_SLOTS:
+        if args.slot:
+            args.writing_model = args.slot
+        if args.research_slot:
+            args.research_model = args.research_slot
+        # Validate that if these look like slot ids, they exist
+        for label, val in [("writing", args.writing_model), ("research", args.research_model)]:
+            slot = _bw_slots.get_slot(val)
+            if slot and ":" not in val and "/" not in val:
+                # Looks like a slot id (no colons or slashes typical of model_ids)
+                print(f"📌 {label} slot: {slot.id} ({slot.name}, type={slot.type})")
+            elif not slot and ":" in val:
+                # Looks like a model_id (Ollama format)
+                pass
+            else:
+                # Could be either; warn if not found as slot
+                if val and not slot:
+                    # Check if it's a valid Ollama model
+                    try:
+                        import urllib.request as _ur
+                        with _ur.urlopen("http://127.0.0.1:11434/api/tags", timeout=2) as r:
+                            models = [m["name"] for m in json.loads(r.read()).get("models", [])]
+                        if val in models or any(m.startswith(val.split(":")[0]) for m in models):
+                            pass  # OK, it's an Ollama model
+                        else:
+                            print(f"⚠️  {label} model/slot {val!r} not found in slots or Ollama. Using anyway.")
+                    except Exception:
+                        pass
 
     out = Path(os.path.expanduser(args.output_dir))
     out.mkdir(parents=True, exist_ok=True)
@@ -239,7 +338,7 @@ def main():
 
     # ---- Research
     print(f"🔍 Researching with {args.research_model}...")
-    research = ollama_generate(args.research_model,
+    research = slot_aware_generate(args.research_model,
         RESEARCH_PROMPT.format(subject=args.title, premise=args.premise, style=args.style),
         system="You are a research analyst for fiction. Output structured bullet notes, ~600 words. Be specific and vivid."
     )
@@ -248,7 +347,7 @@ def main():
 
     # ---- Outline
     print(f"📋 Outline with {args.research_model}...")
-    outline_text = ollama_generate(args.research_model,
+    outline_text = slot_aware_generate(args.research_model,
         OUTLINE_PROMPT.format(chapters=args.chapters, premise=args.premise,
                               style=args.style, genre=args.genre, research=research[:4000]),
         system="You are a story architect. Output a numbered chapter outline with summaries."

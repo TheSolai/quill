@@ -1,0 +1,166 @@
+slots:
+- id: gemma4-mlx
+  name: Gemma 4 MLX 31B (Local, default)
+  type: mlx
+  model_id: gemma4:31b-mlx
+  endpoint: http://127.0.0.1:11434
+  api_key: null
+  options:
+    temperature: 0.85
+    top_p: 0.92
+    top_k: 60
+    num_ctx: 8192
+  purpose: creative
+  is_default: true
+  metadata:
+    vram: 24GB
+    speed: fast
+    quality: very_high
+    notes: Apple Silicon MLX runtime via Ollama. Best default for literary prose.
+  created_at: 1784986777.9127638
+- id: gemma4-fast
+  name: Gemma 4 8B (Local, fast)
+  type: ollama
+  model_id: gemma4:latest
+  endpoint: http://127.0.0.1:11434
+  api_key: null
+  options:
+    temperature: 0.9
+    top_p: 0.92
+    num_ctx: 8192
+  purpose: creative
+  is_default: false
+  metadata:
+    vram: 8GB
+    speed: very_fast
+    quality: high
+    notes: Quick drafts. Lower quality but very fast.
+  created_at: 1784986777.9127731
+- id: qwen3-30b
+  name: Qwen 3 30B (Local, long-context)
+  type: ollama
+  model_id: qwen3:30b
+  endpoint: http://127.0.0.1:11434
+  api_key: null
+  options:
+    temperature: 0.85
+    top_p: 0.9
+    num_ctx: 32768
+  purpose: creative
+  is_default: false
+  metadata:
+    vram: 24GB
+    speed: medium
+    quality: very_high
+    notes: 32K context. Best for long coherent arcs.
+  created_at: 1784986777.912777
+- id: gpt-oss-20b
+  name: GPT-OSS 20B (Local, thinking)
+  type: ollama
+  model_id: gpt-oss:20b
+  endpoint: http://127.0.0.1:11434
+  api_key: null
+  options:
+    temperature: 0.5
+    top_p: 0.9
+    num_ctx: 131072
+  purpose: research
+  is_default: false
+  metadata:
+    vram: 16GB
+    speed: medium
+    quality: very_high
+    notes: 131K context, thinking-heavy. Good for outlines + structural review.
+  created_at: 1784986777.912779
+- id: qwen-coder-30b
+  name: Qwen 3 Coder 30B (Local, code)
+  type: ollama
+  model_id: qwen3-coder:30b
+  endpoint: http://127.0.0.1:11434
+  api_key: null
+  options:
+    temperature: 0.2
+    num_ctx: 262144
+  purpose: code
+  is_default: false
+  metadata:
+    vram: 24GB
+    speed: medium
+    quality: highest
+    notes: 262K context. For code generation.
+  created_at: 1784986777.9127822
+- id: llama3-70b
+  name: Llama 3.3 70B (Local, epic)
+  type: ollama
+  model_id: llama3.3:70b
+  endpoint: http://127.0.0.1:11434
+  api_key: null
+  options:
+    temperature: 0.8
+    top_p: 0.95
+    num_ctx: 8192
+  purpose: creative
+  is_default: false
+  metadata:
+    vram: 48GB
+    speed: slow
+    quality: highest
+    notes: Epic-scale narratives. When quality matters most.
+  created_at: 1784986777.9127848
+- id: minimax-text
+  name: MiniMax Text 01 (Cloud)
+  type: minimax
+  model_id: MiniMax-Text-01
+  endpoint: https://api.minimax.io/v1/text/chatcompletion_v2
+  api_key: null
+  options:
+    temperature: 0.85
+    top_p: 0.9
+    max_tokens: 4096
+  purpose: general
+  is_default: false
+  metadata:
+    vram: cloud
+    speed: medium
+    quality: high
+    notes: MiniMax's general-purpose text model. Requires MINIMAX_API_KEY env var.
+    context: 128000
+  created_at: 1784986777.912788
+- id: minimax-m27
+  name: MiniMax M2.7 (Cloud, reasoning)
+  type: minimax
+  model_id: MiniMax-M2.7
+  endpoint: https://api.minimax.io/v1/text/chatcompletion_v2
+  api_key: null
+  options:
+    temperature: 0.7
+    top_p: 0.9
+    max_tokens: 8192
+  purpose: general
+  is_default: false
+  metadata:
+    vram: cloud
+    speed: medium
+    quality: very_high
+    notes: M2.7 with thinking. Strong reasoning + 200K context.
+    context: 200000
+  created_at: 1784986777.91279
+- id: minimax-highspeed
+  name: MiniMax M2.7 Highspeed (Cloud, fast)
+  type: minimax
+  model_id: MiniMax-M2.7-highspeed
+  endpoint: https://api.minimax.io/v1/text/chatcompletion_v2
+  api_key: null
+  options:
+    temperature: 0.85
+    top_p: 0.9
+    max_tokens: 4096
+  purpose: general
+  is_default: false
+  metadata:
+    vram: cloud
+    speed: fast
+    quality: high
+    notes: Faster variant of M2.7. Lower latency, similar quality.
+    context: 200000
+  created_at: 1784986777.912792

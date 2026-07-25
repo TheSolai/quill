@@ -16,9 +16,19 @@ final class LLMRegistry: ObservableObject {
 
     @Published private(set) var providers: [LLMProvider] = []
     @Published var selectedProviderId: String = "ollama"
+    /// True when the active provider is a slot-based one (loaded from the
+    /// backend). False for the legacy hard-coded providers.
+    @Published private(set) var usingSlotProvider: Bool = false
+
+    /// The current slot-based provider, if any. Set by `detectAndSelect`.
+    private var slotProvider: LLMSlotProvider?
 
     var selectedProvider: LLMProvider? {
-        providers.first { $0.id == selectedProviderId }
+        // Prefer slot-based provider when available
+        if let sp = slotProvider {
+            return sp
+        }
+        return providers.first { $0.id == selectedProviderId }
     }
 
     private init() {
@@ -30,6 +40,20 @@ final class LLMRegistry: ObservableObject {
     }
 
     func detectAndSelect() async {
+        // First try the slot system
+        await LLMSlotRegistry.shared.load()
+        if let activeSlot = LLMSlotRegistry.shared.activeSlot {
+            let slotProv = LLMSlotRegistry.shared.provider(for: activeSlot)
+            if await slotProv.isAvailable() {
+                self.slotProvider = slotProv as? LLMSlotProvider
+                self.usingSlotProvider = true
+                self.selectedProviderId = "slot:\(activeSlot.id)"
+                print("[LLMRegistry] using slot provider: \(activeSlot.name) (\(activeSlot.type))")
+                return
+            }
+        }
+        // Fall back to legacy hard-coded providers
+        usingSlotProvider = false
         for provider in providers {
             let available = await provider.isAvailable()
             print("[LLMRegistry] \(provider.name): \(available ? "available" : "not available")")
@@ -43,7 +67,12 @@ final class LLMRegistry: ObservableObject {
     }
 
     var providerDescriptions: [ProviderDescription] {
-        providers.map { ProviderDescription(id: $0.id, name: $0.name) }
+        var descs: [ProviderDescription] = []
+        if usingSlotProvider, let s = slotProvider {
+            descs.append(ProviderDescription(id: "slot:\(s.id)", name: s.name))
+        }
+        descs.append(contentsOf: providers.map { ProviderDescription(id: $0.id, name: $0.name) })
+        return descs
     }
 }
 

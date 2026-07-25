@@ -193,11 +193,200 @@ def file_op_to_sse_message(op_result):
     return f"data: {json.dumps(op_result.to_json())}\n\n"
 
 
+# ---- Model slots (swappable AI backends) -----------------------------------
+# Slots let users switch between local Ollama, MLX, LM Studio, and MiniMax.
+# Active slot persists across restarts. See models/slots.py + slot_providers.py.
+
+import sys as _sys
+_MODELS_DIR = Path(__file__).parent.parent / "models"
+if str(_MODELS_DIR) not in _sys.path:
+    _sys.path.insert(0, str(_MODELS_DIR))
+import slots as _slots  # noqa: E402
+import slot_providers as _slot_providers  # noqa: E402
+
+
+@app.route("/api/slots", methods=["GET"])
+def list_slots():
+    """List all model slots. The active slot is marked."""
+    all_slots = _slots.load_slots()
+    active_id = _slots.get_active_slot_id()
+    return {
+        "slots": [s.public_dict() for s in all_slots],
+        "active_id": active_id,
+        "provider_types": _slot_providers.list_provider_types(),
+    }
+
+
+@app.route("/api/slots/<slot_id>", methods=["GET"])
+def get_slot(slot_id):
+    slot = _slots.get_slot(slot_id)
+    if not slot:
+        return {"error": f"slot {slot_id!r} not found"}, 404
+    return slot.public_dict()
+
+
+@app.route("/api/slots", methods=["POST"])
+def create_slot():
+    """Create a new slot. Body: full slot definition."""
+    data = safe_json()
+    try:
+        slot = _slots.ModelSlot(**data)
+    except (TypeError, ValueError) as e:
+        return {"error": f"invalid slot: {e}"}, 400
+    try:
+        saved = _slots.add_slot(slot)
+    except ValueError as e:
+        return {"error": str(e)}, 400
+    return saved.public_dict(), 201
+
+
+@app.route("/api/slots/<slot_id>", methods=["PUT"])
+def update_slot(slot_id):
+    """Update fields on an existing slot. Body: partial slot fields."""
+    data = safe_json()
+    # Don't allow id change
+    data.pop("id", None)
+    try:
+        updated = _slots.update_slot(slot_id, **data)
+    except ValueError as e:
+        return {"error": str(e)}, 400
+    if not updated:
+        return {"error": f"slot {slot_id!r} not found"}, 404
+    return updated.public_dict()
+
+
+@app.route("/api/slots/<slot_id>", methods=["DELETE"])
+def delete_slot(slot_id):
+    try:
+        ok = _slots.delete_slot(slot_id)
+    except ValueError as e:
+        return {"error": str(e)}, 400
+    if not ok:
+        return {"error": f"slot {slot_id!r} not found"}, 404
+    return {"deleted": slot_id}
+
+
+@app.route("/api/slots/active", methods=["GET"])
+def get_active_slot():
+    slot = _slots.get_active_slot()
+    return slot.public_dict()
+
+
+@app.route("/api/slots/<slot_id>/activate", methods=["POST"])
+def activate_slot(slot_id):
+    if not _slots.get_slot(slot_id):
+        return {"error": f"slot {slot_id!r} not found"}, 404
+    _slots.set_active_slot(slot_id)
+    return {"active_id": slot_id}
+
+
+@app.route("/api/slots/<slot_id>/test", methods=["POST"])
+def test_slot(slot_id):
+    """Test connectivity + generation for a slot. Returns {ok, latency_ms, error}."""
+    import time as _time
+    slot = _slots.get_slot(slot_id)
+    if not slot:
+        return {"error": f"slot {slot_id!r} not found"}, 404
+    try:
+        prov = _slot_providers.get_provider(slot)
+    except Exception as e:
+        return {"ok": False, "error": f"provider init failed: {e}"}, 500
+    t0 = _time.time()
+    try:
+        ok = prov.test()
+        latency = (_time.time() - t0) * 1000
+        return {
+            "ok": ok,
+            "latency_ms": round(latency, 1),
+            "slot_id": slot_id,
+            "type": slot.type,
+            "model_id": slot.model_id,
+        }
+    except Exception as e:
+        latency = (_time.time() - t0) * 1000
+        return {
+            "ok": False,
+            "latency_ms": round(latency, 1),
+            "error": str(e),
+            "slot_id": slot_id,
+        }
+
+
+@app.route("/api/chat", methods=["POST"])
+def chat_completion():
+    """Unified chat endpoint with slot routing.
+
+    Body:
+      slot_id: optional, uses active if missing
+      messages: list of {role, content}
+      stream: bool, default true
+      system: optional system prompt override
+      max_tokens: optional override
+      temperature: optional override
+
+    Response: SSE stream of "data: {token}\n\n" or full JSON if !stream.
+    """
+    data = safe_json()
+    slot_id = data.get("slot_id") or _slots.get_active_slot_id()
+    slot = _slots.get_slot(slot_id)
+    if not slot:
+        return {"error": f"slot {slot_id!r} not found"}, 404
+    messages = data.get("messages", [])
+    if not messages:
+        return {"error": "messages is required"}, 400
+    stream = data.get("stream", True)
+    overrides = {}
+    if "system" in data:
+        # Prepend system message
+        messages = [{"role": "system", "content": data["system"]}] + messages
+    if "max_tokens" in data:
+        overrides["max_tokens"] = data["max_tokens"]
+    if "temperature" in data:
+        overrides["temperature"] = data["temperature"]
+    if "top_p" in data:
+        overrides["top_p"] = data["top_p"]
+    try:
+        provider = _slot_providers.get_provider(slot)
+    except Exception as e:
+        return {"error": f"provider init failed: {e}"}, 500
+    if stream:
+        def gen():
+            try:
+                for token in provider.stream(messages, **overrides):
+                    yield f"data: {json.dumps({'token': token, 'slot_id': slot_id})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'slot_id': slot_id})}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e), 'slot_id': slot_id})}\n\n"
+        return Response(gen(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache"})
+    else:
+        try:
+            text = provider.chat(messages, **overrides)
+            return {"text": text, "slot_id": slot_id, "model_id": slot.model_id}
+        except Exception as e:
+            return {"error": str(e)}, 500
+
+
 # ---- Routes ----
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    return {"backend": "ok", "ollama": "unknown", "model": MODEL}
+    active = _slots.get_active_slot()
+    ollama_ok = False
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=2) as r:
+            ollama_ok = r.status == 200
+    except Exception:
+        pass
+    return {
+        "backend": "ok",
+        "ollama": "ok" if ollama_ok else "down",
+        "model": active.model_id,
+        "slot_id": active.id,
+        "slot_name": active.name,
+        "slot_type": active.type,
+    }
 
 
 @app.route("/api/projects", methods=["GET"])
@@ -691,6 +880,8 @@ a:hover { text-decoration: underline; }
 @app.route("/api/projects/<project_id>/settings", methods=["GET"])
 def get_settings(project_id):
     ctx = get_project_context(project_id)
+    # Default to the active slot's model_id, but allow per-project override
+    default_model = _slots.get_active_slot().model_id
     return {
         "title": ctx.get("title", project_id.replace("-", " ").title()),
         "author": ctx.get("author", ""),
@@ -698,7 +889,8 @@ def get_settings(project_id):
         "dedication": ctx.get("dedication", ""),
         "epigraph": ctx.get("epigraph", ""),
         "style": ctx.get("style", "literary, vivid, atmospheric prose"),
-        "model": MODEL,
+        "model": ctx.get("model", default_model),
+        "slot_id": ctx.get("slot_id", _slots.get_active_slot_id()),
         "chapters_dir": str(get_project_dir(project_id)),
     }
 
@@ -707,7 +899,7 @@ def get_settings(project_id):
 def update_settings(project_id):
     data = safe_json()
     ctx = get_project_context(project_id)
-    for key in ["title", "author", "genre", "dedication", "epigraph", "style"]:
+    for key in ["title", "author", "genre", "dedication", "epigraph", "style", "model", "slot_id"]:
         if key in data:
             ctx[key] = data[key]
     save_project_context(project_id, ctx)
