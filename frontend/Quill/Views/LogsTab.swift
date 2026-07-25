@@ -28,6 +28,7 @@ struct LogsTab: View {
     @State private var isPaused: Bool = false
     @State private var autoScroll: Bool = true
     @State private var lastFetchedBytes: Int = 0
+    @State private var lastFetchedMtime: Date = .distantPast
 
     enum Stream: String, CaseIterable, Identifiable {
         case actions = "Actions"
@@ -193,8 +194,14 @@ struct LogsTab: View {
     private func fetchBackendLog() async {
         let url = URL(fileURLWithPath: "/tmp/quill_backend.log")
         do {
+            // Check mtime first — skip the read entirely if file hasn't changed
+            let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+            if let mtime = attrs[.modificationDate] as? Date, mtime == lastFetchedMtime {
+                return
+            }
+            lastFetchedMtime = attrs[.modificationDate] as? Date ?? .distantPast
             let data = try Data(contentsOf: url)
-            guard data.count != lastFetchedBytes else { return }
+            if data.count == lastFetchedBytes { return }
             lastFetchedBytes = data.count
             if let str = String(data: data, encoding: .utf8) {
                 // Keep last 2000 lines
@@ -202,7 +209,9 @@ struct LogsTab: View {
                 let trimmed = Array(lines.suffix(2000))
                 await MainActor.run { self.backendLines = trimmed }
             }
-        } catch {}
+        } catch {
+            // File doesn't exist yet — backend may not be running
+        }
     }
 
     private func pollLoop() async {

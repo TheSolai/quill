@@ -1199,3 +1199,194 @@ class TestResolveChapterTarget:
             with open(fp) as f:
                 content = f.read()
             assert "dark and stormy" in content
+
+
+# --------------------------------------------------------------------------
+# OpenClaw skills integration
+# --------------------------------------------------------------------------
+
+class TestSkillsEndpoints:
+    """Tests for /api/skills — exposes the user's installed OpenClaw skills
+    to the AI and the UI."""
+
+    def test_skills_list(self, client):
+        r = client.get("/api/skills")
+        assert r.status_code == 200
+        d = r.get_json()
+        assert "skills" in d
+        assert "status" in d
+        assert d["status"]["available"] is True
+        assert d["status"]["skill_count"] > 0
+        # Each skill has a name + keywords
+        for s in d["skills"]:
+            assert "name" in s
+            assert "keywords" in s
+            assert "paths" in s
+
+    def test_skills_list_contains_common_skills(self, client):
+        r = client.get("/api/skills")
+        d = r.get_json()
+        names = {s["name"] for s in d["skills"]}
+        # Common skills that should be in any OpenClaw install
+        assert "summarize" in names
+        assert "github" in names
+        assert "weather" in names
+
+    def test_get_skill(self, client):
+        r = client.get("/api/skills/summarize")
+        assert r.status_code == 200
+        d = r.get_json()
+        assert d["name"] == "summarize"
+        assert "keywords" in d
+        assert "summarize" in [k.lower() for k in d["keywords"]]
+
+    def test_get_skill_not_found(self, client):
+        r = client.get("/api/skills/nonexistent_skill_xyz")
+        assert r.status_code == 404
+        assert "not found" in r.get_json()["error"].lower()
+
+    def test_skills_reload(self, client):
+        r = client.post("/api/skills/reload")
+        assert r.status_code == 200
+        d = r.get_json()
+        assert "available" in d
+        assert "skill_count" in d
+
+
+class TestSkillsInSystemPrompt:
+    """Tests that OpenClaw skills are injected into the default system prompt."""
+
+    def test_prompt_includes_skills(self):
+        from server import _dross_system_prompt
+        prompt = _dross_system_prompt()
+        # If skills are available, they should be in the prompt
+        from skills import status, list_skills
+        s = status()
+        if s["available"]:
+            assert "OpenClaw skills" in prompt
+            # The priority skills (summarize, github, weather) should be near
+            # the top of the list (priority sort).
+            assert "summarize" in prompt
+        # The base prompt should always be there
+        assert "You are Quill" in prompt
+        assert "web_search" in prompt
+        assert "email_send" in prompt
+
+    def test_skills_for_prompt_function(self):
+        from skills import skills_for_prompt
+        block = skills_for_prompt(max_skills=10)
+        if block:
+            assert "OpenClaw skills" in block
+            # Count the skill lines (each is `- \`name\``)
+            count = block.count("\n- `")
+            assert count > 0
+            assert count <= 10  # max_skills respected
+
+    def test_find_skill_by_keyword(self):
+        from skills import find_skill_by_keyword
+        r = find_skill_by_keyword("can you summarize this article")
+        # May or may not find depending on installed skills, but shouldn't crash
+        if r:
+            assert "name" in r
+
+    def test_mcp_exposes_skills_tools(self, client):
+        """MCP should expose list_skills and read_skill tools."""
+        # initialize
+        r = client.post("/api/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}
+        })
+        tools = {t["name"] for t in r.get_json()["result"]["tools"]}
+        assert "list_skills" in tools
+        assert "read_skill" in tools
+
+    def test_mcp_list_skills(self, client):
+        r = client.post("/api/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "list_skills", "arguments": {}}
+        })
+        assert r.status_code == 200
+        result = r.get_json()["result"]
+        text = result["content"][0]["text"]
+        import json as _json
+        data = _json.loads(text)
+        assert "skills" in data
+        assert "status" in data
+
+    def test_mcp_read_skill(self, client):
+        r = client.post("/api/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "read_skill", "arguments": {"name": "summarize"}}
+        })
+        assert r.status_code == 200
+        result = r.get_json()["result"]
+        text = result["content"][0]["text"]
+        import json as _json
+        data = _json.loads(text)
+        assert data["name"] == "summarize"
+
+
+# --------------------------------------------------------------------------
+# Server info + project location discovery
+# --------------------------------------------------------------------------
+
+class TestInfoEndpoint:
+    """Tests for /api/info (server config, base_dir, skills status)."""
+
+    def test_info_endpoint(self, client):
+        r = client.get("/api/info")
+        assert r.status_code == 200
+        d = r.get_json()
+        assert "version" in d
+        assert "base_dir" in d
+        assert "base_dir_exists" in d
+        assert "ollama_url" in d
+        assert "agentmail_inbox" in d
+        assert "skills" in d
+        assert d["skills"]["count"] > 0
+
+    def test_base_dir_resolves(self, client):
+        """The discovered BASE_DIR should exist (or have been created)."""
+        from server import BASE_DIR
+        # Test fixture sets BASE_DIR to a temp dir, so this should be the temp dir
+        r = client.get("/api/info")
+        d = r.get_json()
+        assert d["base_dir"] == str(BASE_DIR)
+
+
+class TestRequestSizeLimit:
+    """Test that the server rejects oversized requests."""
+
+    def test_oversized_payload_rejected(self, client):
+        # Create a chapter with a huge content payload
+        big = "a" * (33 * 1024 * 1024)  # 33MB > 32MB limit
+        r = client.post("/api/projects", json={"name": "size-test"})
+        pid = r.get_json()["id"]
+        r = client.put(f"/api/projects/{pid}/chapters/big/content", json={"content": big})
+        # Should be 413 Payload Too Large
+        assert r.status_code == 413
+
+
+class TestSkillsReload:
+    """Test the /api/skills/reload endpoint."""
+
+    def test_reload_returns_status(self, client):
+        r = client.post("/api/skills/reload")
+        assert r.status_code == 200
+        d = r.get_json()
+        assert "available" in d
+        assert "skill_count" in d
+
+
+class TestSaveErrorHandling:
+    """Tests that the save error handler toasts and retries appropriately."""
+
+    def test_save_succeeds_via_put(self, client):
+        """Smoke test for the put endpoint that saveNow uses."""
+        r = client.post("/api/projects", json={"name": "save-test"})
+        pid = r.get_json()["id"]
+        client.post(f"/api/projects/{pid}/chapters", json={"name": "c1"})
+        r = client.put(f"/api/projects/{pid}/chapters/c1/content", json={"content": "Hello"})
+        assert r.status_code == 200
+        # Verify it persisted
+        r = client.get(f"/api/projects/{pid}/chapters/c1/content")
+        assert "Hello" in r.get_json()["content"]

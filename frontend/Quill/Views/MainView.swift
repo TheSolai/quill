@@ -122,6 +122,13 @@ struct MainView: View {
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .background(bgPrimary)
+            .overlay(alignment: .bottomTrailing) {
+                ToastBanner(
+                    center: ToastCenter.shared,
+                    bg: bgSecondary,
+                    textPrimary: textPrimary
+                )
+            }
             .onAppear {
                 panel.clampHeight(for: geo.size.height)
                 // Make sure everything is visible on start

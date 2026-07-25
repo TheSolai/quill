@@ -53,6 +53,25 @@ struct HealthResponse: Codable {
     let backend: String
     let ollama: String
     let model: String
+    let slotId: String?
+    let slotName: String?
+    let slotType: String?
+
+    enum CodingKeys: String, CodingKey {
+        case backend, ollama, model
+        case slotId = "slot_id"
+        case slotName = "slot_name"
+        case slotType = "slot_type"
+    }
+}
+
+/// Lightweight wrapper used internally for tracking connection state.
+/// Currently just a Bool, but kept as a struct so we can extend with
+/// latency, model name, etc. without breaking call sites.
+struct BackendHealth: Equatable {
+    var backendReady: Bool
+    var ollamaReachable: Bool
+    var model: String
 }
 
 struct ErrorResponse: Codable {
@@ -216,9 +235,20 @@ class AppState: ObservableObject {
 
     @Published var isBackendReady: Bool = false
     @Published var backendError: String?
+    @Published var backendHealth: BackendHealth? = nil
+    @Published var ollamaReachable: Bool = false
+    private var healthPollTask: Task<Void, Never>?
 
     @Published var statusMessage: String = "Ready"
     @Published var wordCount: Int = 0
+
+    // Inbox state — loaded on app start so the Inbox tab is always ready.
+    // The InboxTab just observes this; the data is loaded here regardless
+    // of which tab is currently active.
+    @Published var inboxMessages: [InboxMessage] = []
+    @Published var inboxLoading: Bool = false
+    @Published var inboxStatus: String = ""
+    private var inboxPollTask: Task<Void, Never>?
 
     // Tracks the current async load to cancel stale requests
     private var projectsLoadTask: Task<Void, Never>?
@@ -239,6 +269,109 @@ class AppState: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 await self?.saveNow()
+            }
+        }
+        // Start polling the inbox right away so the Inbox tab has data on
+        // first open. Without this, the Inbox tab would be empty until the
+        // user explicitly opens it (and the .task on the tab view doesn't
+        // fire reliably when the tab is in a ZStack with opacity 0).
+        Task { @MainActor in
+            await self.refreshInbox()
+            await self.pollInboxLoop()
+        }
+        // Start polling backend health so the UI can show the AI status
+        Task { @MainActor in
+            await self.pollHealthLoop()
+        }
+    }
+
+    // MARK: - Inbox
+
+    /// Fetch the latest inbox messages from the backend.
+    func refreshInbox() async {
+        inboxLoading = true
+        defer { inboxLoading = false }
+        do {
+            let resp = try await BackendService.shared.getRaw("/api/agentmail/inbox?limit=50")
+            if let json = try? JSONSerialization.jsonObject(with: resp) as? [String: Any],
+               let list = json["messages"] as? [[String: Any]] {
+                let parsed = list.compactMap { InboxMessage.from(json: $0) }
+                await MainActor.run {
+                    self.inboxMessages = parsed
+                    self.inboxStatus = "Updated \(Self.timeString())"
+                }
+            }
+        } catch {
+            await MainActor.run { self.inboxStatus = "Error: \(error.localizedDescription)" }
+        }
+    }
+
+    /// Long-running poll loop — refreshes the inbox every 30s.
+    private func pollInboxLoop() async {
+        inboxPollTask?.cancel()
+        let task = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)  // 30s
+                guard !Task.isCancelled else { return }
+                await self?.refreshInbox()
+            }
+        }
+        inboxPollTask = task
+        await task.value
+    }
+
+    private static func timeString() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: Date())
+    }
+
+    // MARK: - Health
+
+    /// Poll backend health every 10s. Updates `backendHealth` and
+    /// `ollamaReachable` so the UI can show the AI status and toast on
+    /// connection changes.
+    private func pollHealthLoop() async {
+        healthPollTask?.cancel()
+        let task = Task { [weak self] in
+            var lastReachable: Bool? = nil
+            while !Task.isCancelled {
+                guard !Task.isCancelled else { return }
+                await self?.checkHealth()
+                let reachable = self?.ollamaReachable ?? false
+                if let last = lastReachable, last != reachable {
+                    if reachable {
+                        ToastCenter.shared.postSuccess("Backend reconnected")
+                    } else {
+                        ToastCenter.shared.postWarning("Backend unreachable — using cached state")
+                    }
+                }
+                lastReachable = reachable
+                try? await Task.sleep(nanoseconds: 10_000_000_000)  // 10s
+            }
+        }
+        healthPollTask = task
+        await task.value
+    }
+
+    private func checkHealth() async {
+        do {
+            let h: HealthResponse = try await BackendService.shared.get("/api/health")
+            await MainActor.run {
+                self.backendHealth = BackendHealth(
+                    backendReady: h.backend == "ok",
+                    ollamaReachable: h.ollama == "ok",
+                    model: h.model
+                )
+                self.isBackendReady = (h.backend == "ok")
+                self.ollamaReachable = (h.ollama == "ok")
+                if h.backend == "ok" { self.backendError = nil }
+            }
+        } catch {
+            await MainActor.run {
+                self.isBackendReady = false
+                self.ollamaReachable = false
+                self.backendError = error.localizedDescription
             }
         }
     }
@@ -438,14 +571,36 @@ class AppState: ObservableObject {
                     }
                 }
             }
+        } catch let error as BackendError {
+            handleSaveError(error: error, previousState: previousState, content: contentToSave)
         } catch {
-            saveState = .error(error.localizedDescription)
-            backendError = error.localizedDescription
-            // If we were dirty before, restore the dirty state and re-schedule
-            // an autosave so transient errors (e.g. backend restart) heal.
-            if case .dirty = previousState {
-                saveState = .dirty
-                scheduleAutosave()
+            handleSaveError(error: BackendError.httpError(0, error.localizedDescription), previousState: previousState, content: contentToSave)
+        }
+    }
+
+    /// Common error handling for saveNow — toasts the user, retries on
+    /// transient failures, and sets the state appropriately.
+    private func handleSaveError(error: Error, previousState: SaveState, content: String) {
+        let msg = (error as? BackendError)?.errorDescription ?? error.localizedDescription
+        let isNetworkError = msg.lowercased().contains("network") || msg.lowercased().contains("could not connect")
+        saveState = .error(msg)
+        backendError = msg
+        // If we were dirty before, restore the dirty state and re-schedule
+        // an autosave so transient errors (e.g. backend restart) heal.
+        if case .dirty = previousState {
+            saveState = .dirty
+            scheduleAutosave()
+        }
+        // Toast the error so the user notices (the in-editor indicator is small)
+        ToastCenter.shared.postError("Save failed: \(msg)")
+        // Auto-retry network errors after 5s (backend might be restarting)
+        if isNetworkError {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if case .dirty = self.saveState {
+                    ToastCenter.shared.postInfo("Retrying save…")
+                    await self.saveNow()
+                }
             }
         }
     }

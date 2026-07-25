@@ -11,6 +11,7 @@
 		0207E21D6633358F5797FFAA /* LLMSlotProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D2B19E18DA3A6ADD0F7204E /* LLMSlotProvider.swift */; };
 		078D1842CDFA10FD8E5BF72C /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 754B2F597668B5D2B8025A9C /* AppDelegate.swift */; };
 		2689C04289489540FB58E602 /* ExportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB7E1C953A0793130D869C33 /* ExportView.swift */; };
+		28E1A0813DD026B50984F0D8 /* ToastCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55D32372890E24715230E898 /* ToastCenter.swift */; };
 		42387E640DDEC9B914B85410 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF31C8EE91FDE72C86EE086E /* SettingsView.swift */; };
 		4864771C9407B77053F91C98 /* ProcessManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A32FD7AC085DC7FBD13EA0A /* ProcessManager.swift */; };
 		4ED0C1E902CF80340A965682 /* PanelState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42F747EE698DB3FCAE41B631 /* PanelState.swift */; };
@@ -19,6 +20,7 @@
 		6190521C86561D9D30E41751 /* BackendService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75A7451BF983B67A99CB5387 /* BackendService.swift */; };
 		6BFF43DD6477CFC053C9C9C9 /* CorkboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7886B8AD4BBDD0E326FC6A38 /* CorkboardView.swift */; };
 		6DA99894461AF26112196137 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBBB8425B76428A097BB6A89 /* SidebarView.swift */; };
+		6E7CD4E15C5E6C457B0F4AB6 /* InboxMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F6515933BA94A38CDF6A8D6 /* InboxMessage.swift */; };
 		70F995D321C92B3F52160D5F /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60F819DF97C48799DA43D12E /* MainView.swift */; };
 		746AB2CAD9464D64A2E852A2 /* LLMProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5161E45303B642C95F0C2431 /* LLMProvider.swift */; };
 		74C599EC3516CA0624154C77 /* InboxTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3440FA6D60F8EA745638403C /* InboxTab.swift */; };
@@ -43,6 +45,8 @@
 		3440FA6D60F8EA745638403C /* InboxTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxTab.swift; sourceTree = "<group>"; };
 		42F747EE698DB3FCAE41B631 /* PanelState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelState.swift; sourceTree = "<group>"; };
 		5161E45303B642C95F0C2431 /* LLMProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMProvider.swift; sourceTree = "<group>"; };
+		55D32372890E24715230E898 /* ToastCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastCenter.swift; sourceTree = "<group>"; };
+		5F6515933BA94A38CDF6A8D6 /* InboxMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxMessage.swift; sourceTree = "<group>"; };
 		60F819DF97C48799DA43D12E /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		754B2F597668B5D2B8025A9C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		75A7451BF983B67A99CB5387 /* BackendService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendService.swift; sourceTree = "<group>"; };
@@ -97,8 +101,10 @@
 		8F11832E3F66BB6F589627D5 /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				5F6515933BA94A38CDF6A8D6 /* InboxMessage.swift */,
 				85B1D813A23ACB1A01F4234B /* Models.swift */,
 				42F747EE698DB3FCAE41B631 /* PanelState.swift */,
+				55D32372890E24715230E898 /* ToastCenter.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -232,6 +238,7 @@
 				9C58A53707924C96DEF5E39D /* EditorView.swift in Sources */,
 				2689C04289489540FB58E602 /* ExportView.swift in Sources */,
 				55D0AD0E1FC0A25D8CD53987 /* Extensions.swift in Sources */,
+				6E7CD4E15C5E6C457B0F4AB6 /* InboxMessage.swift in Sources */,
 				74C599EC3516CA0624154C77 /* InboxTab.swift in Sources */,
 				746AB2CAD9464D64A2E852A2 /* LLMProvider.swift in Sources */,
 				0207E21D6633358F5797FFAA /* LLMSlotProvider.swift in Sources */,
@@ -246,6 +253,7 @@
 				6DA99894461AF26112196137 /* SidebarView.swift in Sources */,
 				C700CB840D742AF742E172AE /* StoryBibleView.swift in Sources */,
 				01C03F582B47B9B7663F56B7 /* TerminalTab.swift in Sources */,
+				28E1A0813DD026B50984F0D8 /* ToastCenter.swift in Sources */,
 				53B8B5F3CDFE8CA124A18470 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

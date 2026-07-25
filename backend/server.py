@@ -17,7 +17,45 @@ PORT = 5323
 MODEL = "gemma4:latest"
 
 app = Flask(__name__)
+# CORS — open by default since this is a local backend. Lock down if exposed.
 CORS(app)
+# Max request body size: 32 MB (chapter content + context can be large but
+# anything bigger is probably malicious). Flask default is unlimited.
+app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
+
+
+def _discover_base_dir() -> Path:
+    """Find the Quill projects directory.
+
+    Searches in order:
+      1. The current BASE_DIR (~/Quill/projects)
+      2. ~/Projects/Quill/  (newer layout)
+      3. $QUILL_PROJECTS env var (override)
+      4. Defaults to BASE_DIR (creates if missing)
+
+    Returns a Path that may or may not exist; callers should ensure_base_dir()
+    before relying on it.
+    """
+    env = os.environ.get("QUILL_PROJECTS")
+    if env:
+        p = Path(env).expanduser()
+        if p.exists() and p.is_dir():
+            return p
+    # Common locations, prefer ones that exist
+    candidates = [
+        Path.home() / "Quill" / "projects",
+        Path.home() / "Projects" / "Quill" / "projects",
+        Path.home() / "Projects" / "quill" / "projects",
+        Path.home() / "quill" / "projects",
+    ]
+    for c in candidates:
+        if c.exists() and c.is_dir():
+            return c
+    return BASE_DIR
+
+
+# Use discovered path on startup; can be overridden by env var
+BASE_DIR = _discover_base_dir()
 
 
 def send_file(path, mimetype, as_attachment, download_name):
@@ -274,6 +312,7 @@ import agentmail_service as _agentmail  # noqa: E402
 import dross_tools as _dross_tools  # noqa: E402  (kept as alias for Quill tool registry)
 import vellum_docx as _vellum_docx  # noqa: E402
 import web_search as _web_search  # noqa: E402
+import skills as _skills  # noqa: E402
 
 
 @app.route("/api/slots", methods=["GET"])
@@ -711,8 +750,12 @@ def _dross_system_prompt() -> str:
 
     Quill is the AI writing partner for the Quill app. The user (Quill, the
     human) is the writer. We are co-writers.
+
+    The system prompt also includes the user's installed OpenClaw skills
+    (from ~/.openclaw/skills or ~/Projects/thesolai.github.io/skills) so
+    Quill knows what skills are available and can use them when relevant.
     """
-    return """You are Quill, the AI writing partner in the Quill app.
+    base = """You are Quill, the AI writing partner in the Quill app.
 
 You are a master fiction writer and literary collaborator. Vivid sensory prose,
 strong character interiority, immersive atmosphere. Literary but readable. Short
@@ -730,10 +773,10 @@ Available tools (call by emitting a JSON block in your reply like this):
 Tools:
 - web_search: search the web for current information. args: {query, max_results?}
 - web_fetch: fetch a URL and extract text. args: {url, max_chars?}
-- email_send: send an email from quill@agentmail.to. args: {to, subject, text, html?}
+- email_send: send an email from the Quill inbox (thedross@agentmail.to). args: {to, subject, text, html?}
 - email_list_inbox: list recent emails. args: {limit?}
 - email_reply: reply to an email. args: {message_id, text}
-- shell_exec: run a shell command. args: {cmd, cwd?, timeout?}
+- shell_exec: run a shell command (safety-checked). args: {cmd, cwd?, timeout?}
 - list_files: list files in a directory. args: {path?}
 - read_file: read a text file. args: {path}
 
@@ -744,6 +787,11 @@ within your capabilities. You trust the reader to understand subtext.
 When you receive a tool result, incorporate it naturally into your reply.
 Do not output raw JSON tool calls in your final visible response — use the
 tools to gather information, then answer in prose."""
+    # Inject OpenClaw skills so the AI knows what's installed
+    skills_block = _skills.skills_for_prompt(max_skills=30)
+    if skills_block:
+        return base + "\n\n---\n\n" + skills_block
+    return base
 
 
 def _handle_email_intent(intent: dict, project_id: str) -> dict:
@@ -1330,6 +1378,28 @@ def health():
         "slot_id": active.id,
         "slot_name": active.name,
         "slot_type": active.type,
+    }
+
+
+@app.route("/api/info", methods=["GET"])
+def info():
+    """Return server configuration (projects dir, skills, etc).
+
+    Used by the Swift client on startup to discover the actual base dir
+    and to surface server health/version info in the UI.
+    """
+    skills_status = _skills.status()
+    return {
+        "version": "1.0.0",
+        "base_dir": str(BASE_DIR),
+        "base_dir_exists": BASE_DIR.exists(),
+        "ollama_url": "http://127.0.0.1:11434",
+        "agentmail_inbox": _agentmail.QUILL_INBOX if hasattr(_agentmail, "QUILL_INBOX") else _agentmail.DROSS_INBOX,
+        "skills": {
+            "available": skills_status["available"],
+            "count": skills_status["skill_count"],
+            "config_path": skills_status["config_path"],
+        },
     }
 
 
@@ -2047,6 +2117,47 @@ def get_stats(project_id):
     return stats
 
 
+# ---- OpenClaw skills --------------------------------------------------------
+# The user has OpenClaw skills installed at ~/.openclaw/skills/ or
+# ~/Projects/thesolai.github.io/skills/. These endpoints let the AI and
+# the UI inspect what's available.
+
+@app.route("/api/skills", methods=["GET"])
+def list_skills():
+    """List all available OpenClaw skills.
+
+    Returns:
+      { status, skills: [{name, slug, keywords, paths}] }
+    """
+    status = _skills.status()
+    return {
+        "status": status,
+        "skills": _skills.list_skills(),
+    }
+
+
+@app.route("/api/skills/<name>", methods=["GET"])
+def get_skill(name):
+    """Get a single skill's full SKILL.md content (if installed locally)."""
+    info = _skills.get_skill(name)
+    if not info:
+        return {"error": f"skill {name!r} not found in registry"}, 404
+    content = _skills.read_skill_md(name)
+    return {
+        "name": name,
+        "keywords": info.get("keywords", []),
+        "paths": info.get("paths", []),
+        "content": content,  # may be None if SKILL.md not on disk
+    }
+
+
+@app.route("/api/skills/reload", methods=["POST"])
+def reload_skills():
+    """Force a reload of the skills registry (after adding new skills)."""
+    _skills.reload()
+    return _skills.status()
+
+
 @app.route("/api/projects/<project_id>/stats", methods=["PUT"])
 def update_stats(project_id):
     """Update writing stats. Used to record sessions, set goals, etc."""
@@ -2277,6 +2388,23 @@ MCP_TOOLS = [
             "properties": {"limit": {"type": "integer"}},
         },
     },
+    {
+        "name": "list_skills",
+        "description": "List all available OpenClaw skills (installed in the user's setup)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "read_skill",
+        "description": "Read the full SKILL.md content for a named skill",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
 ]
 
 
@@ -2375,6 +2503,22 @@ def _mcp_call_tool(name, args):
         if not _agentmail.is_available():
             return {"error": "AgentMail not available"}
         return _agentmail.list_inbox(limit=args.get("limit", 20))
+    if name == "list_skills":
+        return {
+            "status": _skills.status(),
+            "skills": _skills.list_skills(),
+        }
+    if name == "read_skill":
+        skill_name = args.get("name", "")
+        info = _skills.get_skill(skill_name)
+        if not info:
+            return {"error": f"skill {skill_name!r} not found"}
+        return {
+            "name": skill_name,
+            "keywords": info.get("keywords", []),
+            "paths": info.get("paths", []),
+            "content": _skills.read_skill_md(skill_name),
+        }
     return {"error": f"unknown tool: {name}"}
 
 

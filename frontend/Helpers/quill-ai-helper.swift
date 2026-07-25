@@ -58,7 +58,7 @@ func main() async -> Int32 {
     }
 
     // Pass-through: unknown subcommand → shell
-    let known = ["status", "ask", "chat", "fix", "expand", "condense", "slots", "projects", "chapters", "scenes", "search", "email", "mcp", "help"]
+    let known = ["status", "ask", "chat", "fix", "expand", "condense", "slots", "projects", "chapters", "scenes", "search", "email", "mcp", "skills", "help"]
     if !known.contains(cmd) {
         return runShellPassThrough(args)
     }
@@ -79,6 +79,7 @@ func main() async -> Int32 {
         case "search":    try await cmdSearch(subArgs)
         case "email":     try await cmdEmail(subArgs)
         case "mcp":       try await cmdMcp(subArgs)
+        case "skills":    try await cmdSkills(subArgs)
         case "help":      printUsage()
         default: break
         }
@@ -125,6 +126,7 @@ func printUsage() {
       search "query"               Web search via DuckDuckGo
       email [list|send ...]        List inbox or send an email
       mcp serve                    Start MCP server (stdio JSON-RPC)
+      skills [list|show NAME]      List/show OpenClaw skills
 
     Any other command is passed to /bin/sh -c, so you can run:
       quill ls
@@ -464,6 +466,67 @@ func cmdMcp(_ args: [String]) async throws {
     }
 }
 
+func cmdSkills(_ args: [String]) async throws {
+    let sub = args.first ?? "list"
+    if sub == "list" || sub == "ls" {
+        let data = try await httpGet("/api/skills") as? [String: Any] ?? [:]
+        let status = data["status"] as? [String: Any] ?? [:]
+        let skills = data["skills"] as? [[String: Any]] ?? []
+        if let count = status["skill_count"] as? Int {
+            print("\(count) skills available")
+        }
+        if let path = status["config_path"] as? String {
+            print("config: \(path)")
+        }
+        print("")
+        for s in skills {
+            let name = s["name"] as? String ?? "?"
+            let keywords = (s["keywords"] as? [String]) ?? []
+            let kwPreview = keywords.prefix(5).joined(separator: ", ")
+            print("  \(name.padding(toLength: 24, withPad: " ", startingAt: 0)) \(kwPreview)")
+        }
+    } else if sub == "show" {
+        guard args.count > 1 else { printError("skills show <name>"); exit(1) }
+        let name = args[1]
+        let data = try await httpGet("/api/skills/\(name)") as? [String: Any] ?? [:]
+        if let content = data["content"] as? String, !content.isEmpty {
+            print(content)
+        } else {
+            print("(no SKILL.md content for \(name) — registry entry only)")
+            if let k = data["keywords"] as? [String] {
+                print("keywords: \(k.joined(separator: ", "))")
+            }
+        }
+    } else if sub == "reload" {
+        let data = try await httpPost("/api/skills/reload", body: [:]) as? [String: Any] ?? [:]
+        printJSON(data)
+    } else if sub == "find" {
+        // Find a skill whose keywords match a phrase
+        guard args.count > 1 else { printError("skills find <phrase>"); exit(1) }
+        let phrase = args.dropFirst().joined(separator: " ")
+        let data = try await httpGet("/api/skills") as? [String: Any] ?? [:]
+        let skills = data["skills"] as? [[String: Any]] ?? []
+        let phraseLower = phrase.lowercased()
+        let matches = skills.filter { s in
+            let kws = (s["keywords"] as? [String]) ?? []
+            return kws.contains(where: { phraseLower.contains($0.lowercased()) })
+        }
+        if matches.isEmpty {
+            print("no skills match \"\(phrase)\"")
+        } else {
+            print("\(matches.count) skills match \"\(phrase)\":")
+            for s in matches {
+                let n = s["name"] as? String ?? "?"
+                let k = ((s["keywords"] as? [String]) ?? []).prefix(3).joined(separator: ", ")
+                print("  \(n) — \(k)")
+            }
+        }
+    } else {
+        printError("skills: unknown subcommand \(sub). Try `quill skills list`")
+        exit(1)
+    }
+}
+
 // MARK: - REPL
 
 func runREPL() async {
@@ -485,6 +548,8 @@ func runREPL() async {
             case "scenes":    try await cmdScenes(Array(parts.dropFirst()))
             case "search":    try await cmdSearch(Array(parts.dropFirst()))
             case "email":     try await cmdEmail(Array(parts.dropFirst()))
+            case "mcp":       try await cmdMcp(Array(parts.dropFirst()))
+            case "skills":    try await cmdSkills(Array(parts.dropFirst()))
             case "fix":       try await cmdFix(Array(parts.dropFirst()), instruction: "fix typos and grammar")
             case "expand":    try await cmdFix(Array(parts.dropFirst()), instruction: "expand with sensory detail")
             case "condense":  try await cmdFix(Array(parts.dropFirst()), instruction: "condense and tighten")

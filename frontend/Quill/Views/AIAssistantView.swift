@@ -37,8 +37,26 @@ struct AIAssistantView: View {
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundColor(accent)
                 Spacer()
-                // Inbox badge — shows unread email count
-                InboxBadge(accent: accent, textMuted: textMuted)
+                // Backend connection status
+                BackendStatusDot(
+                    ollamaReachable: state.ollamaReachable,
+                    backendReady: state.isBackendReady,
+                    textMuted: textMuted,
+                    accent: accent
+                )
+                // Inbox unread count (data comes from AppState which polls
+                // every 30s — no separate fetcher needed here)
+                if !state.inboxMessages.isEmpty {
+                    HStack(spacing: 3) {
+                        Image(systemName: "envelope.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(textMuted)
+                        Text("\(state.inboxMessages.count)")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundColor(accent)
+                    }
+                    .help("Inbox: \(state.inboxMessages.count) recent messages — open the Inbox tab in the bottom panel")
+                }
                 if state.isStreaming {
                     HStack(spacing: 5) {
                         ProgressView()
@@ -320,47 +338,41 @@ struct MessageBubble: View {
     }
 }
 
-// MARK: - Inbox badge
-// Shows how many recent emails are in the Quill inbox. Click to refresh.
+// MARK: - Backend status indicator
+// Small dot that shows whether the backend is reachable and Ollama is up.
+// Green = both ready. Yellow = backend up, Ollama down. Red = backend down.
 
-struct InboxBadge: View {
-    let accent: Color
+struct BackendStatusDot: View {
+    let ollamaReachable: Bool
+    let backendReady: Bool
     let textMuted: Color
-    @State private var count: Int = 0
-    @State private var isLoading: Bool = false
+    let accent: Color
 
     var body: some View {
-        Button(action: refresh) {
-            HStack(spacing: 3) {
-                Image(systemName: "envelope")
-                    .font(.system(size: 10))
-                    .foregroundColor(textMuted)
-                if count > 0 {
-                    Text("\(count)")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundColor(accent)
-                }
-            }
-            .help("Quill inbox (\(count) recent) — click to refresh")
+        HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+            Text(label)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(textMuted)
         }
-        .buttonStyle(.plain)
-        .onAppear { refresh() }
+        .help(helpText)
     }
 
-    private func refresh() {
-        isLoading = true
-        Task {
-            defer { isLoading = false }
-            guard let url = URL(string: "http://127.0.0.1:5323/api/agentmail/inbox?limit=20") else { return }
-            do {
-                let (data, _) = try await URLSession.shared.data(from: url)
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let msgs = json["messages"] as? [[String: Any]] {
-                    await MainActor.run { self.count = msgs.count }
-                }
-            } catch {
-                // ignore
-            }
-        }
+    private var color: Color {
+        if !backendReady { return Color.red }
+        if !ollamaReachable { return Color.orange }
+        return Color.green
+    }
+    private var label: String {
+        if !backendReady { return "offline" }
+        if !ollamaReachable { return "no-ollama" }
+        return "ready"
+    }
+    private var helpText: String {
+        if !backendReady { return "Backend is unreachable. Start the Python server." }
+        if !ollamaReachable { return "Backend is up, but Ollama is not responding. Check `ollama serve`." }
+        return "Backend and Ollama are ready."
     }
 }

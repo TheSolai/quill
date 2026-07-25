@@ -3,9 +3,12 @@ import AppKit
 
 // MARK: - InboxTab
 //
-// Full email UI: list of recent messages, viewer pane, and a compose form
-// for sending. Backed by the /api/agentmail/* endpoints. Polls for new
-// messages every 30s.
+// Email UI backed by AppState.inboxMessages (which polls /api/agentmail/
+// inbox every 30s). Showing a list + viewer + compose form.
+//
+// We observe AppState directly so messages appear the moment they're
+// loaded — the user doesn't have to click the Inbox tab first to trigger
+// the fetch.
 
 struct InboxTab: View {
     @ObservedObject var state: AppState
@@ -17,16 +20,13 @@ struct InboxTab: View {
     let textMuted: Color
     let border: Color
 
-    @State private var messages: [EmailMessage] = []
     @State private var selectedMessageId: String? = nil
-    @State private var isLoading: Bool = false
     @State private var showCompose: Bool = false
     @State private var composeTo: String = ""
     @State private var composeSubject: String = ""
     @State private var composeBody: String = ""
     @State private var composeStatus: String = ""
     @State private var isSending: Bool = false
-    @State private var status: String = "Ready"
 
     var body: some View {
         HSplitView {
@@ -38,20 +38,24 @@ struct InboxTab: View {
             if showCompose {
                 composePane
             } else if let id = selectedMessageId,
-                      let msg = messages.first(where: { $0.id == id }) {
+                      let msg = state.inboxMessages.first(where: { $0.id == id }) {
                 messageViewer(msg)
             } else {
                 emptyState
             }
         }
         .background(bgPrimary)
-        .task {
-            await refresh()
-            await pollLoop()
+        .onAppear {
+            // Auto-select the first message so the right pane isn't blank
+            if selectedMessageId == nil, let first = state.inboxMessages.first {
+                selectedMessageId = first.id
+            }
         }
-        .toolbar {
-            // We don't have a real NSToolbar, but SwiftUI lets us put a
-            // mini toolbar at the top via safeAreaInset
+        .onChange(of: state.inboxMessages) { _, msgs in
+            // If the current selection was deleted or never set, pick the first
+            if selectedMessageId == nil || !msgs.contains(where: { $0.id == selectedMessageId }) {
+                selectedMessageId = msgs.first?.id
+            }
         }
     }
 
@@ -65,7 +69,7 @@ struct InboxTab: View {
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundColor(textMuted)
                 Spacer()
-                Button(action: { Task { await refresh() } }) {
+                Button(action: { Task { await state.refreshInbox() } }) {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 10))
                         .foregroundColor(textMuted)
@@ -85,14 +89,14 @@ struct InboxTab: View {
             .background(bg)
             Divider().background(border)
 
-            if isLoading && messages.isEmpty {
+            if state.inboxLoading && state.inboxMessages.isEmpty {
                 VStack {
                     Spacer()
                     ProgressView()
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if messages.isEmpty {
+            } else if state.inboxMessages.isEmpty {
                 VStack(spacing: 8) {
                     Spacer()
                     Image(systemName: "envelope")
@@ -107,7 +111,7 @@ struct InboxTab: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(messages) { msg in
+                        ForEach(state.inboxMessages) { msg in
                             messageRow(msg)
                             Divider().background(border)
                         }
@@ -117,11 +121,11 @@ struct InboxTab: View {
 
             Divider().background(border)
             HStack {
-                Text("\(messages.count) messages")
+                Text("\(state.inboxMessages.count) messages")
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundColor(textMuted)
                 Spacer()
-                Text(status)
+                Text(state.inboxStatus)
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundColor(textMuted)
             }
@@ -132,7 +136,7 @@ struct InboxTab: View {
         .background(bg)
     }
 
-    private func messageRow(_ msg: EmailMessage) -> some View {
+    private func messageRow(_ msg: InboxMessage) -> some View {
         let isSelected = selectedMessageId == msg.id
         return Button(action: { selectedMessageId = msg.id; showCompose = false }) {
             VStack(alignment: .leading, spacing: 2) {
@@ -154,6 +158,16 @@ struct InboxTab: View {
                     .font(.system(size: 10))
                     .foregroundColor(textMuted)
                     .lineLimit(2)
+                if msg.labels.contains("unread") {
+                    HStack(spacing: 3) {
+                        Circle()
+                            .fill(accent)
+                            .frame(width: 4, height: 4)
+                        Text("unread")
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundColor(accent)
+                    }
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -164,7 +178,7 @@ struct InboxTab: View {
 
     // MARK: - Viewer
 
-    private func messageViewer(_ msg: EmailMessage) -> some View {
+    private func messageViewer(_ msg: InboxMessage) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top) {
@@ -366,7 +380,7 @@ struct InboxTab: View {
         }
     }
 
-    private func replyTo(_ msg: EmailMessage) {
+    private func replyTo(_ msg: InboxMessage) {
         composeTo = msg.from
         composeSubject = msg.subject.lowercased().hasPrefix("re:") ? msg.subject : "Re: \(msg.subject)"
         composeBody = "\n\n---\nOn \(fullDate(msg.timestamp)), \(msg.from) wrote:\n\(msg.body.isEmpty ? msg.preview : msg.body)"
@@ -374,41 +388,9 @@ struct InboxTab: View {
         selectedMessageId = nil
     }
 
-    // MARK: - Data
-
-    private func refresh() async {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            let resp = try await BackendService.shared.getRaw("/api/agentmail/inbox?limit=50")
-            if let json = try? JSONSerialization.jsonObject(with: resp) as? [String: Any],
-               let list = json["messages"] as? [[String: Any]] {
-                let parsed = list.compactMap { EmailMessage.from(json: $0) }
-                await MainActor.run {
-                    self.messages = parsed
-                    self.status = "Updated \(timeString())"
-                }
-            }
-        } catch {
-            await MainActor.run { self.status = "Error: \(error.localizedDescription)" }
-        }
-    }
-
-    private func pollLoop() async {
-        while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 30_000_000_000)
-            await refresh()
-        }
-    }
-
-    private func timeString() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        return f.string(from: Date())
-    }
+    // MARK: - Date helpers
 
     private func shortDate(_ s: String) -> String {
-        // Try to parse ISO date; fall back to original
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if let d = f.date(from: s) ?? ISO8601DateFormatter().date(from: s) {
@@ -427,26 +409,5 @@ struct InboxTab: View {
             return out.string(from: d)
         }
         return s
-    }
-}
-
-// MARK: - EmailMessage
-
-struct EmailMessage: Identifiable, Hashable {
-    let id: String
-    let from: String
-    let subject: String
-    let preview: String
-    let body: String
-    let timestamp: String
-
-    static func from(json: [String: Any]) -> EmailMessage? {
-        guard let id = json["id"] as? String else { return nil }
-        let from = json["from"] as? String ?? "unknown"
-        let subject = json["subject"] as? String ?? "(no subject)"
-        let preview = json["preview"] as? String ?? json["text"] as? String ?? ""
-        let body = json["body"] as? String ?? json["text"] as? String ?? preview
-        let timestamp = json["created_at"] as? String ?? json["timestamp"] as? String ?? ""
-        return EmailMessage(id: id, from: from, subject: subject, preview: preview, body: body, timestamp: timestamp)
     }
 }

@@ -1,235 +1,236 @@
-# Quill — Native macOS Writing Assistant
+# Quill
 
-A **Zed-inspired** native macOS writing app powered by local AI. Three-panel layout: chapters on the left, markdown editor in the center, AI assistant on the right.
+**A native macOS writing studio for novelists.** Zed-style editor with a side panel for AI assistance, a bottom panel for terminal/inbox/logs, and a powerful backend that orchestrates local and cloud LLMs.
 
----
+Quill is co-written with AI: the app itself is the AI writing partner, and the AI chat is the writer. You type, the AI suggests, you accept, autosave kicks in.
+
+## Highlights
+
+- **Native macOS app** (SwiftUI + AppKit) — no Electron, no browser
+- **AI chat** with a writing partner persona (Quill), with OpenClaw skill injection
+- **Zed-style Tab-to-fix** inline AI corrections (press Tab in the editor to fix typos/grammar on the current selection or sentence)
+- **Bottom panel** with **terminal**, **inbox**, **logs** tabs (Cmd+J to toggle)
+- **Right panel** with the AI assistant (or use the bottom Terminal tab — both work)
+- **Autosave** (2s debounce) + explicit Save button + Cmd+S
+- **Multi-model** support via "slots": Ollama (gemma4, qwen3, gpt-oss, llama3, qwen-coder, llama3-groq-tool-use), MLX, LM Studio, MiniMax cloud
+- **55 OpenClaw skills** auto-injected into the AI's system prompt (summarize, github, weather, coding-agent, etc.)
+- **MCP server** (HTTP `/api/mcp` and stdio `quill mcp serve`) — Claude Desktop, Cursor, etc. can drive Quill
+- **Vellum-compatible DOCX export** + PDF / DOCX / MD / TXT / HTML / ePub / RTF / OPML / ZIP bundle
+- **`quill` CLI** — full subcommand set (status, ask, chat, fix, slots, projects, chapters, scenes, search, email, mcp, skills) installed to `~/.local/bin/quill`
 
 ## Architecture
 
 ```
-Quill.app (SwiftUI + AppKit)
-    │
-    ├── starts backend ──► http://localhost:5323
-    │                         │
-    │                         ├── Flask backend (server.py)
-    │                         │     ├── File CRUD for .md chapters
-    │                         │     ├── Compile & export (PDF, DOCX, MD, TXT)
-    │                         │     └── Ollama API wrapper → gemma4
-    │
-    └── quill-ai-helper (bundled Swift CLI)
-          └── bridges to Ollama or Apple Intelligence
-
-user's ~/Projects/Quill/projects/...
+┌──────────────────────────────────────────────────────────────────┐
+│  Quill.app (SwiftUI + AppKit)                                    │
+│  ┌─────────┬──────────────────────────┬──────────────────────┐│
+│  │ Sidebar │ Editor (Zed-style,        │ AI Assistant          ││
+│  │ (left)  │ MarkdownTextEditor with   │ (right side)         ││
+│  │         │ Tab-to-fix inline AI)     │                      ││
+│  │         ├──────────────────────────┤                      ││
+│  │         │ Bottom Panel:             │                      ││
+│  │         │  Terminal | Inbox | Logs  │                      ││
+│  └─────────┴──────────────────────────┴──────────────────────┘│
+└──────────────────────────────────────────────────────────────────┘
+                       │ URLSession (10min/30min timeouts)
+                       ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Backend: Python Flask on http://127.0.0.1:5323                  │
+│  - /api/projects, /api/chapters, /api/scenes                     │
+│  - /api/chat (streaming SSE, slot routing, tool calls)            │
+│  - /api/edit-fix (Zed-style inline fix)                           │
+│  - /api/agentmail/* (Quill inbox via AgentMail)                   │
+│  - /api/skills (OpenClaw skills registry)                         │
+│  - /api/mcp (JSON-RPC 2.0, HTTP)                                 │
+│  - /api/tools/call (web_search, email_send, shell_exec, etc.)    │
+└──────────────────────────────────────────────────────────────────┘
+                       │
+                       ▼
+        ┌──────────────┴──────────────┐
+        ▼                             ▼
+  ┌──────────┐                 ┌──────────┐
+  │ Ollama   │                 │ MiniMax  │
+  │ (local)  │                 │ (cloud)  │
+  └──────────┘                 └──────────┘
 ```
-
----
 
 ## Setup
 
-### 1. Install Ollama
+### Prerequisites
+
+- macOS 15+ (Apple Silicon recommended)
+- Xcode 15+
+- Python 3.11+
+- [Ollama](https://ollama.com) installed and running
+- Pull the models you want to use:
+  ```bash
+  ollama pull gemma4:latest
+  ollama pull gemma4:31b-mlx  # if you have Apple Silicon
+  ollama pull qwen3:30b
+  ollama pull llama3-groq-tool-use:8b
+  # ...
+  ```
+
+### Install
 
 ```bash
-brew install ollama
-ollama pull gemma4
-```
+git clone https://github.com/TheSolAI/quill.git
+cd quill
+# Backend deps
+cd backend && pip install -r requirements.txt  # or: pip install flask flask-cors
+cd ..
 
-### 2. Install Python dependencies
+# Generate Xcode project (if needed)
+cd frontend && xcodegen generate
 
-```bash
-cd ~/Projects/Quill/backend
-pip install -r requirements.txt
-```
-
-### 3. Install Pandoc (for export)
-
-```bash
-brew install pandoc
-```
-
-### 4. Generate the Xcode project
-
-```bash
-cd ~/Projects/Quill/frontend
-which xcodegen || brew install xcodegen
-xcodegen generate
-```
-
-### 5. Open and build in Xcode
-
-```bash
-open ~/Projects/Quill/frontend/Quill.xcodeproj
-```
-
-- Select **Quill** target → **My Mac** → press **⌘R** to run
-
-Or from the command line:
-
-```bash
-cd ~/Projects/Quill/frontend
+# Build
 xcodebuild -project Quill.xcodeproj -scheme Quill -configuration Debug build
 ```
 
----
-
-## Features
-
-### Three-Panel Layout
-- **Left — Chapters sidebar**: project list, chapter list, word count
-- **Center — Markdown editor**: write and edit chapters with auto-save
-- **Right — AI Assistant**: chat, chapter generation, file operations
-
-### AI Modes
-
-Toggle between two modes in the AI panel:
-
-| Mode | Description |
-|------|-------------|
-| **Short** | Chat, brainstorming, character questions, plot feedback |
-| **Long** | Multi-pass chapter generation — scene write → sensory enhancement → character tracking → summary update |
-
-### Natural Language File Operations
-
-The AI assistant understands commands like:
-
-```
-create chapter 3
-→ Creates chapter-3.md instantly
-
-rename chapter 1 to chapter-one
-→ Renames the file
-
-delete chapter 2
-→ Removes the file
-
-write chapter 3
-→ Detects the intent, creates the chapter, and streams content
-```
-
-### Compile & Export (`⌘E`)
-
-Merge all chapters into a single manuscript with YAML front matter. Export to:
-
-| Format | Notes |
-|--------|-------|
-| **PDF** | Print-ready via Pandoc + weasyprint |
-| **DOCX** | Microsoft Word via Pandoc |
-| **Markdown** | Raw merged `.md` with all chapters |
-| **Plain Text** | Stripped markdown, no formatting |
-
-### Project Settings (`⌘,`)
-
-Configure per-project metadata that feeds into exports:
-
-- **Title** — book title
-- **Author** — your name
-- **Genre** — fiction category
-- **Dedication / Epigraph** — front matter
-- **Style Notes** — narrative voice, tone, and preferences for AI generation
-
----
-
-## Menu Bar
-
-| Menu | Items |
-|------|-------|
-| **Quill** | About, Settings, Quit |
-| **File** | New Project (`⌘N`), Export Book (`⌘E`), Compile Preview (`⌘⇧P`), Close (`⌘W`) |
-| **Edit** | Undo, Redo, Cut, Copy, Paste, Select All |
-| **View** | Toggle Sidebar (`⌘⌃S`), Toggle AI Panel (`⌘⌃A`), Full Screen |
-| **Window** | Minimize, Zoom, Bring All to Front |
-| **Help** | Quill Help |
-
----
-
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| `⌘N` | New project |
-| `⌘E` | Export book |
-| `⌘⇧P` | Compile preview |
-| `⌘,` | Project settings |
-| `⌘W` | Close window |
-| `⌘Q` | Quit Quill |
-| `⌘⌃S` | Toggle sidebar |
-| `⌘⌃A` | Toggle AI panel |
-
----
-
-## AI Providers
-
-Three options in Settings. Choose whichever fits your setup:
-
-| Provider | How it works |
-|----------|-------------|
-| **Ollama (Local)** | Direct HTTP to Flask backend → Ollama gemma4 |
-| **Swift Helper (Local)** | Bundled Swift CLI bridge to Ollama — same models, native path |
-| **Apple Intelligence** | On-device AI via Apple framework — requires macOS 26+ |
-
-Both Ollama routes use your local `gemma4:latest` model. Apple Intelligence is a stub — swap in the real framework once it ships.
-
----
-
-## Testing
+### Run
 
 ```bash
-cd ~/Projects/Quill/backend
-./run_tests.sh
+# 1. Start the backend (auto-started by the app via ProcessManager too)
+cd backend
+python3 server.py
+# -> "Quill Backend] Starting on http://localhost:5323"
+
+# 2. Open the app
+open frontend/Helpers/Quill.app
+# or: open ~/Library/Developer/Xcode/DerivedData/Quill-*/Build/Products/Debug/Quill.app
 ```
 
-48 backend tests covering health, projects, chapters, context, settings, compile, export, and file-op parsing/execution.
+### Install the `quill` CLI
 
----
-
-## Customisation
-
-**Change the AI model** — Edit `~/Projects/Quill/backend/server.py`:
-```python
-MODEL = "llama3.3:latest"   # change from gemma4:latest
-```
-
-**Change the project directory** — Edit `BASE_DIR` in `server.py`:
-```python
-BASE_DIR = Path.home() / "Projects" / "Quill" / "projects"
-```
-
-**Rebuild after changes:**
 ```bash
-xcodegen generate  # after Swift changes
-cd ~/Projects/Quill/backend && python3 server.py  # restart backend after Python changes
+ln -sf /path/to/quill/frontend/Helpers/quill-ai-helper ~/.local/bin/quill
+# Now you can run `quill status`, `quill fix myfile.md`, etc. from anywhere
 ```
 
----
+## Usage
 
-## Troubleshooting
+### AI chat (right panel)
+- Type anything; the AI responds as Quill, your writing partner
+- **Long form mode** (default): "write chapter 3" or "make chapter 1" triggers the chapter-write path — prose is generated and saved directly to the chapter file
+- **Short form mode**: pure chat for brainstorming, questions, feedback
+- The AI knows about 55+ OpenClaw skills (summarize, github, weather, etc.) and the available tools (email, web search, shell)
 
-**"Cannot connect to backend"**
-→ The backend failed to start. Run manually:
+### Tab-to-fix inline AI (editor)
+- Press **Tab** in the editor to fix the current selection (or current sentence/paragraph) via `/api/edit-fix`
+- Uses `groq-tool-use:8b` by default for fast precise fixes
+- Accept with the replacement or undo with ⌘Z
+
+### Bottom panel tabs
+- **Terminal**: REPL shell. Each command is a one-shot Process. Arrow keys for history, Tab for path completion. Try `quill status`, `quill ask "..."`, `quill fix chapter.md`
+- **Inbox**: Full email UI. Polls `/api/agentmail/inbox` every 30s. Compose, reply, view messages.
+- **Logs**: Two streams — Action log (in-app actions) + Backend log (`/tmp/quill_backend.log`). Filter by level, search text.
+
+### Save behavior
+- **Autosave**: 2s debounce after every edit
+- **Save button**: in the editor header — click to save immediately
+- **Cmd+S**: menu bar File > Save
+- Status indicator shows: `unsaved` → `saving…` → `✓ saved` → `saved`
+
+### MCP server
+Quill exposes its tools via MCP. Connect from Claude Desktop, Cursor, or any MCP client:
+
+```json
+{
+  "mcpServers": {
+    "quill": {
+      "command": "quill",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+Or HTTP: `http://127.0.0.1:5323/api/mcp` (JSON-RPC 2.0)
+
+### `quill` CLI
+
 ```bash
-cd ~/Projects/Quill/backend && python3 server.py
+quill status                              # show active model, project, etc.
+quill slots                               # list AI slots
+quill slots active gemma4-fast           # activate a slot
+quill ask "what is 2+2?"                  # one-shot Q&A
+quill chat                                # interactive chat
+quill fix chapter.md                      # fix typos/grammar in place
+quill expand chapter.md                   # add sensory detail
+quill condense chapter.md                 # tighten prose
+quill projects list                       # list projects
+quill chapters ls                         # list chapters
+quill search "Tolkien influences"          # web search
+quill email list                          # list inbox
+quill email send user@x.com "Hi" "..."    # send email
+quill skills                              # list OpenClaw skills
+quill mcp serve                           # start MCP server (stdio)
 ```
 
-**Ollama not running**
-→ Start it manually:
-```bash
-ollama serve
+## Project layout
+
+```
+quill/
+├── backend/                       # Python Flask server
+│   ├── server.py                  # main API (2500+ lines, 60+ endpoints)
+│   ├── skills.py                  # OpenClaw skills registry
+│   ├── dross_tools.py             # web_search, email, shell_exec, file ops
+│   ├── agentmail_service.py       # AgentMail API wrapper
+│   ├── web_search.py              # DuckDuckGo HTML scraper
+│   ├── vellum_docx.py             # Vellum-compatible DOCX builder
+│   ├── book_writer.py             # multi-pass long-form generator (CLI)
+│   ├── simulate.py                # end-to-end smoke test
+│   └── tests/                     # 289 passing tests
+├── models/                        # AI slot system
+│   ├── slots.py                   # slot model + persistence
+│   ├── slot_providers.py          # Ollama/MLX/MiniMax/LMStudio/Custom
+│   ├── presets.py                 # default slot presets
+│   └── ollama_writer.py           # legacy
+├── frontend/
+│   ├── Quill/                     # macOS app source
+│   │   ├── AppDelegate.swift      # menu bar, window setup
+│   │   ├── AppCommands.swift       # AppCommandsState (sheets, save doc)
+│   │   ├── main.swift              # entry point
+│   │   ├── Models/                 # data models
+│   │   │   ├── Models.swift        # AppState (main state)
+│   │   │   ├── PanelState.swift    # panel + tabs
+│   │   │   ├── InboxMessage.swift
+│   │   │   └── ToastCenter.swift   # notification system
+│   │   ├── Services/               # backend + AI
+│   │   │   ├── BackendService.swift  # URLSession actor
+│   │   │   ├── LLMProvider.swift   # legacy LLMRegistry
+│   │   │   ├── LLMSlotProvider.swift # slot-based AI
+│   │   │   └── ProcessManager.swift # backend lifecycle
+│   │   ├── Views/                  # SwiftUI views
+│   │   │   ├── MainView.swift
+│   │   │   ├── SidebarView.swift
+│   │   │   ├── EditorView.swift
+│   │   │   ├── MarkdownTextEditor.swift
+│   │   │   ├── AIAssistantView.swift
+│   │   │   ├── PanelContainer.swift
+│   │   │   ├── TerminalTab.swift
+│   │   │   ├── InboxTab.swift
+│   │   │   ├── LogsTab.swift
+│   │   │   ├── StoryBibleView.swift
+│   │   │   ├── CorkboardView.swift
+│   │   │   ├── SettingsView.swift
+│   │   │   └── ExportView.swift
+│   │   └── Utilities/Extensions.swift
+│   ├── Helpers/
+│   │   └── quill-ai-helper.swift   # the `quill` CLI
+│   ├── project.yml                 # XcodeGen config
+│   └── Quill.xcodeproj             # generated by xcodegen
+└── README.md
 ```
 
-**gemma4 not found**
-→ Pull it:
+## Tests
+
 ```bash
-ollama pull gemma4
+cd backend
+python3 -m pytest tests/ -v
+# 289 passed, 1 skipped
 ```
 
-**PDF/DOCX export fails**
-→ Install Pandoc:
-```bash
-brew install pandoc
-```
-For best PDF quality, also install weasyprint:
-```bash
-pip install weasyprint
-```
+## License
 
-**Apple Intelligence shows as unavailable**
-→ That's expected on macOS versions below 26. Use Ollama instead — the feature is stubbed and ready to wire up when the framework ships.
+MIT
