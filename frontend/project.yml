@@ -1,0 +1,52 @@
+name: Quill
+options:
+  bundleIdPrefix: com.quill
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "15.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    PRODUCT_NAME: Quill
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    INFOPLIST_FILE: Quill/Info.plist
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: YES
+
+targets:
+  Quill:
+    type: application
+    platform: macOS
+    sources:
+      - path: Quill
+        excludes:
+          - "*.xcodeproj"
+          - "*.xcworkspace"
+    settings:
+      base:
+        INFOPLIST_FILE: Quill/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.quill.app
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+        COMBINE_HIDPI_IMAGES: YES
+    postCompileScripts:
+      - name: Copy AI Helper
+        script: |
+          HELPER_SRC="$SRCROOT/Helpers/quill-ai-helper"
+          HELPER_DEST="$BUILT_PRODUCTS_DIR/Quill.app/Contents/Helpers/"
+          mkdir -p "$HELPER_DEST"
+          cp -f "$HELPER_SRC" "$HELPER_DEST/quill-ai-helper"
+          chmod +x "$HELPER_DEST/quill-ai-helper"
+        basedOnDependencyAnalysis: false
+    entitlements:
+      path: Quill/Quill.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
+        com.apple.security.files.user-selected.read-write: true

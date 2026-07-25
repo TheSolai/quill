@@ -1,0 +1,33 @@
+# Build outputs
+build/
+dist/
+*.app
+*.dmg
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# Generated content (we commit the scripts, not the books)
+output/
+projects/
+*.log
+.DS_Store
+
+# Models
+*.gguf
+*.bin
+*.safetensors
+
+# IDE
+.vscode/
+.idea/
+*.swp

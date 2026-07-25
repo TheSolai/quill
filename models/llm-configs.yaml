@@ -1,0 +1,147 @@
+# Quill — Ollama/Python model configurations
+# Multiple presets for different use cases: long-form writing, research, outlines, quick chat.
+
+providers:
+  ollama:
+    type: ollama
+    endpoint: http://127.0.0.1:11434
+    models:
+
+      # === Creative writing (long-form, literary quality) ===
+      - id: gemma4:31b
+        name: Gemma 4 31B
+        purpose: long-form-creative
+        vram: 24GB
+        quality: highest
+        speed: slow
+        context: 8192
+        options:
+          temperature: 0.85
+          top_p: 0.92
+        best_for:
+          - full novel chapters
+          - literary prose
+          - character-driven scenes
+
+      - id: gemma4:latest
+        name: Gemma 4 8B
+        purpose: long-form-creative
+        vram: 8GB
+        quality: high
+        speed: fast
+        context: 8192
+        options:
+          temperature: 0.9
+          top_p: 0.92
+        best_for:
+          - chapter drafts
+          - bulk generation
+          - speed > polish
+
+      - id: qwen3:30b
+        name: Qwen 3 30B
+        purpose: long-form-creative
+        vram: 24GB
+        quality: very_high
+        speed: medium
+        context: 32768
+        options:
+          temperature: 0.85
+          top_p: 0.9
+        best_for:
+          - long coherent arcs
+          - complex multi-character scenes
+          - thinking + writing
+
+      - id: llama3.3:70b
+        name: Llama 3.3 70B
+        purpose: long-form-creative
+        vram: 48GB
+        quality: highest
+        speed: very_slow
+        context: 8192
+        options:
+          temperature: 0.8
+          top_p: 0.95
+        best_for:
+          - epic scale narratives
+          - when quality matters most
+
+      # === Research and outlining (analytical) ===
+      - id: qwen3:14b
+        name: Qwen 3 14B
+        purpose: research-outline
+        vram: 12GB
+        quality: very_high
+        speed: fast
+        context: 32768
+        options:
+          temperature: 0.4
+          top_p: 0.9
+        best_for:
+          - worldbuilding research
+          - chapter outlines
+          - structured planning
+
+      - id: gpt-oss:20b
+        name: GPT-OSS 20B
+        purpose: research-outline
+        vram: 16GB
+        quality: very_high
+        speed: medium
+        context: 131072
+        options:
+          temperature: 0.5
+        best_for:
+          - long-context analysis
+          - thinking-heavy tasks
+          - structural review
+
+      # === Code and tooling ===
+      - id: qwen3-coder:30b
+        name: Qwen 3 Coder 30B
+        purpose: code
+        vram: 24GB
+        quality: highest
+        speed: medium
+        context: 262144
+        options:
+          temperature: 0.2
+        best_for:
+          - backend Python
+          - Swift frontend
+          - this README :)
+
+      - id: qwen2.5-coder:32b
+        name: Qwen 2.5 Coder 32B
+        purpose: code
+        vram: 24GB
+        quality: very_high
+        speed: medium
+        context: 32768
+
+  # === Recommended presets (use these in book_writer.py --writing-model etc.) ===
+  presets:
+    fast-novel:
+      research: qwen3:14b
+      outline: qwen3:14b
+      writing: gemma4:latest
+      editor: gpt-oss:20b
+      parallel: 3
+      target_words: 1500
+
+    literary-novel:
+      research: qwen3:14b
+      outline: qwen3:14b
+      writing: gemma4:31b
+      editor: gpt-oss:20b
+      parallel: 2
+      target_words: 2200
+
+    epic-novel:
+      research: qwen3:30b
+      outline: gpt-oss:20b
+      writing: qwen3:30b
+      editor: gpt-oss:120b
+      parallel: 1
+      target_words: 3000
