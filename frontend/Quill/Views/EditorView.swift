@@ -222,7 +222,7 @@ struct EditorView: View {
 
             Spacer()
 
-            // Server indicator — click to change (Dross's "Change server" button)
+            // Server indicator — click to change (Quill's "Change server" button)
             ServerButton(
                 activeSlotId: slotRegistry.activeSlotId,
                 activeSlotName: slotRegistry.activeSlot?.name ?? "—",

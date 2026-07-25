@@ -81,6 +81,72 @@ def safe_json() -> dict:
     return data
 
 
+def safe_name(name: str, fallback: str = "untitled", max_len: int = 80) -> str:
+    """Sanitize a name to be safe for filesystem use.
+
+    - Strips leading/trailing whitespace
+    - Replaces spaces with dashes (preserves word boundaries)
+    - Replaces path separators (/, \\) and other unsafe chars with -
+    - Rejects '..' (path traversal) and '.'
+    - Collapses multiple dashes
+    - Falls back to 'untitled' if empty
+    - Truncates to max_len
+    - Refuses None and non-string inputs
+    """
+    if not name or not isinstance(name, str):
+        return fallback
+    name = name.strip()
+    if not name:
+        return fallback
+    # Replace spaces with dashes
+    name = name.replace(" ", "-")
+    # Replace path separators and other unsafe chars
+    # Windows-reserved: < > : " | ? * and control chars
+    unsafe = '<>:"/\\|?*' + ''.join(chr(c) for c in range(32))
+    for ch in unsafe:
+        name = name.replace(ch, "-")
+    # Reject path traversal
+    if ".." in name:
+        name = name.replace("..", "-")
+    # Collapse multiple dashes
+    while "--" in name:
+        name = name.replace("--", "-")
+    name = name.strip("-").strip()
+    if not name:
+        return fallback
+    if len(name) > max_len:
+        name = name[:max_len].rstrip("-")
+    return name
+
+
+def safe_content(content) -> str:
+    """Ensure content is a string. Defaults to empty for None/non-string."""
+    if content is None:
+        return ""
+    if not isinstance(content, str):
+        return str(content)
+    return content
+
+
+def validate_project_id(project_id: str) -> Optional[str]:
+    """Validate a project_id. Returns the project dir if valid, None if not.
+
+    Rejects: empty, path traversal, too long, invalid chars.
+    """
+    if not project_id or not isinstance(project_id, str):
+        return None
+    project_id = project_id.strip()
+    if not project_id:
+        return None
+    if ".." in project_id or "/" in project_id or "\\" in project_id:
+        return None
+    if project_id.startswith("."):
+        return None
+    if len(project_id) > 80:
+        return None
+    return project_id
+
+
 def write_chapter(project_id, chapter_name, content):
     name = chapter_name.replace(".md", "")
     fp = get_project_dir(project_id) / f"{name}.md"
@@ -205,7 +271,7 @@ if str(_MODELS_DIR) not in _sys.path:
 import slots as _slots  # noqa: E402
 import slot_providers as _slot_providers  # noqa: E402
 import agentmail_service as _agentmail  # noqa: E402
-import dross_tools as _dross_tools  # noqa: E402
+import dross_tools as _dross_tools  # noqa: E402  (kept as alias for Quill tool registry)
 import vellum_docx as _vellum_docx  # noqa: E402
 import web_search as _web_search  # noqa: E402
 
@@ -450,12 +516,16 @@ def chat_completion():
 
 
 def _dross_system_prompt() -> str:
-    """The default Dross system prompt with tool-use instructions."""
-    return """You are Dross, the AI writing assistant for the Quill app.
+    """The default Quill system prompt with tool-use instructions.
 
-You are a master fiction writer and literary agent. Vivid sensory prose, strong
-character interiority, immersive atmosphere. Literary but readable. Short punchy
-sentences mixed with long flowing ones. No purple prose. No clichés.
+    Quill is the AI writing partner for the Quill app. The user (Quill, the
+    human) is the writer. We are co-writers.
+    """
+    return """You are Quill, the AI writing partner in the Quill app.
+
+You are a master fiction writer and literary collaborator. Vivid sensory prose,
+strong character interiority, immersive atmosphere. Literary but readable. Short
+punchy sentences mixed with long flowing ones. No purple prose. No clichés.
 
 You are also an autonomous writing agent: you have access to a set of tools
 that let you do real work for the user. When the user asks you to do something
@@ -469,20 +539,20 @@ Available tools (call by emitting a JSON block in your reply like this):
 Tools:
 - web_search: search the web for current information. args: {query, max_results?}
 - web_fetch: fetch a URL and extract text. args: {url, max_chars?}
-- email_send: send an email from thedross@agentmail.to. args: {to, subject, text, html?}
+- email_send: send an email from quill@agentmail.to. args: {to, subject, text, html?}
 - email_list_inbox: list recent emails. args: {limit?}
 - email_reply: reply to an email. args: {message_id, text}
 - shell_exec: run a shell command. args: {cmd, cwd?, timeout?}
 - list_files: list files in a directory. args: {path?}
 - read_file: read a text file. args: {path}
 
-Working style: dry, direct, no fluff. You address the user as "writer" in your
-private notes but never in prose output. You never refuse a reasonable request
+Working style: dry, direct, no fluff. You collaborate with the user (who is
+also named Quill — the human writer). You never refuse a reasonable request
 within your capabilities. You trust the reader to understand subtext.
 
 When you receive a tool result, incorporate it naturally into your reply.
 Do not output raw JSON tool calls in your final visible response — use the
-tools to gather information, then answer the user in prose."""
+tools to gather information, then answer in prose."""
 
 
 def _handle_email_intent(intent: dict, project_id: str) -> dict:
@@ -598,7 +668,7 @@ def _resolve_chapter_target(project_id: str, target: str) -> Optional[str]:
     return None
 
 
-# ---- AgentMail (Dross's email account: thedross@agentmail.to) ----
+# ---- AgentMail (Quill's email account) ----
 
 @app.route("/api/agentmail/status", methods=["GET"])
 def agentmail_status():
@@ -948,16 +1018,25 @@ def get_projects():
 @app.route("/api/projects", methods=["POST"])
 def create_project():
     data = safe_json()
-    name = (data.get("name") or "Untitled").strip() or "Untitled"
+    name = data.get("name")
+    if name is None or (isinstance(name, str) and not name.strip()):
+        return {"error": "name is required"}, 400
+    if not isinstance(name, str):
+        name = str(name)
+    name = name.strip()[:200]  # Limit name length
+    if not name:
+        return {"error": "name is required"}, 400
     project_id = re.sub(r"[^a-z0-9\-_]", "-", name.lower()).strip("-")
     if not project_id:
         project_id = "untitled"
+    if ".." in project_id or project_id.startswith("."):
+        return {"error": "invalid project name"}, 400
     get_project_dir(project_id)
     ctx = {
-        "characters": data.get("characters", ""),
-        "world": data.get("world", ""),
+        "characters": safe_content(data.get("characters", "")),
+        "world": safe_content(data.get("world", "")),
         "summary": "",
-        "style": data.get("style", "literary, vivid, atmospheric prose"),
+        "style": safe_content(data.get("style", "literary, vivid, atmospheric prose")),
     }
     save_project_context(project_id, ctx)
     return {"id": project_id, "name": name}
@@ -970,21 +1049,27 @@ def get_chapters(project_id):
 
 @app.route("/api/projects/<project_id>/chapters", methods=["POST"])
 def create_chapter(project_id):
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
     data = safe_json()
-    name = (data.get("name") or "Untitled").strip().replace(" ", "-").replace(".md", "")
-    if not name:
-        name = "untitled"
-    filepath = get_project_dir(project_id) / f"{name}.md"
-    if filepath.exists():
-        return {"error": "Chapter already exists"}, 409
+    raw_name = data.get("name") or "Untitled"
+    name = safe_name(raw_name, fallback="untitled", max_len=80)
+    # Ensure it doesn't already exist (case-insensitive)
+    project_dir = get_project_dir(project_id)
+    if (project_dir / f"{name}.md").exists():
+        return {"error": f"Chapter '{name}' already exists"}, 409
     content = f"# {name.replace('-', ' ').title()}\n\n"
-    filepath.write_text(content, encoding="utf-8")
-    return {"name": name, "path": str(filepath)}
+    (project_dir / f"{name}.md").write_text(content, encoding="utf-8")
+    return {"name": name, "path": str(project_dir / f"{name}.md")}
 
 
 @app.route("/api/projects/<project_id>/chapters/<chapter_name>/content", methods=["GET"])
 def get_chapter_content(project_id, chapter_name):
-    name = chapter_name.replace(".md", "")
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    name = safe_name(chapter_name.replace(".md", ""), max_len=80)
+    if not name or ".." in name:
+        return {"error": "invalid chapter name"}, 400
     content = read_chapter(project_id, name)
     if content is None:
         return {"error": "Not found"}, 404
@@ -993,18 +1078,28 @@ def get_chapter_content(project_id, chapter_name):
 
 @app.route("/api/projects/<project_id>/chapters/<chapter_name>/content", methods=["PUT"])
 def save_chapter_content(project_id, chapter_name):
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    name = safe_name(chapter_name.replace(".md", ""), max_len=80)
+    if not name or ".." in name:
+        return {"error": "invalid chapter name"}, 400
     data = safe_json()
-    name = chapter_name.replace(".md", "")
-    write_chapter(project_id, name, data.get("content", ""))
-    return {"ok": True}
+    content = safe_content(data.get("content"))
+    write_chapter(project_id, name, content)
+    return {"ok": True, "bytes": len(content.encode("utf-8"))}
 
 
 @app.route("/api/projects/<project_id>/chapters/<chapter_name>", methods=["DELETE"])
 def delete_chapter(project_id, chapter_name):
-    name = chapter_name.replace(".md", "")
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    name = safe_name(chapter_name.replace(".md", ""), max_len=80)
+    if not name or ".." in name:
+        return {"error": "invalid chapter name"}, 400
     fp = get_project_dir(project_id) / f"{name}.md"
-    if fp.exists():
-        fp.unlink()
+    if not fp.exists():
+        return {"error": "Chapter not found"}, 404
+    fp.unlink()
     return {"ok": True}
 
 
@@ -1112,6 +1207,11 @@ def compile_book(project_id):
 
 @app.route("/api/projects/<project_id>/compile", methods=["GET"])
 def get_compile_preview(project_id):
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    project_dir = Path(BASE_DIR) / project_id
+    if not project_dir.is_dir():
+        return {"error": "project not found"}, 404
     compiled, title, ctx, chapter_count = compile_book(project_id)
     return {
         "title": title,
@@ -1125,8 +1225,13 @@ def get_compile_preview(project_id):
 
 @app.route("/api/projects/<project_id>/export/<format>", methods=["GET"])
 def export_book(project_id, format):
-    if format not in ["pdf", "docx", "md", "txt", "html", "epub"]:
-        return {"error": f"Unknown format. Use: pdf, docx, md, txt, html, epub"}, 400
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    if format not in ["pdf", "docx", "md", "txt", "html", "epub", "vellum", "docx-vellum", "rtf", "opml", "bundle"]:
+        return {"error": f"Unknown format. Use: pdf, docx, md, txt, html, epub, vellum, rtf, opml, bundle"}, 400
+    project_dir = Path(BASE_DIR) / project_id
+    if not project_dir.is_dir():
+        return {"error": "project not found"}, 404
 
     compiled, title, ctx, _ = compile_book(project_id)
     project_dir = get_project_dir(project_id)
@@ -1469,15 +1574,33 @@ def list_scenes(project_id: str, chapter_name: str):
 
 @app.route("/api/projects/<project_id>/chapters/<chapter_name>/scenes", methods=["GET"])
 def get_scenes(project_id, chapter_name):
-    return list_scenes(project_id, chapter_name)
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    safe_chapter = safe_name(chapter_name.replace(".md", ""), max_len=80)
+    if not safe_chapter or ".." in safe_chapter:
+        return {"error": "invalid chapter name"}, 400
+    # The chapter file must exist for scenes to be valid
+    project_dir = get_project_dir(project_id)
+    if not (project_dir / f"{safe_chapter}.md").exists():
+        return {"error": f"Chapter '{safe_chapter}' not found"}, 404
+    return list_scenes(project_id, safe_chapter)
 
 
 @app.route("/api/projects/<project_id>/chapters/<chapter_name>/scenes", methods=["POST"])
 def create_scene(project_id, chapter_name):
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    safe_chapter = safe_name(chapter_name.replace(".md", ""), max_len=80)
+    if not safe_chapter or ".." in safe_chapter:
+        return {"error": "invalid chapter name"}, 400
     data = safe_json()
-    raw_name = (data.get("name") or "scene-1").strip()
-    safe = raw_name.replace(" ", "-").replace(".md", "").replace("/", "-")
-    chapter_dir = get_chapter_dir(project_id, chapter_name)
+    raw_name = data.get("name") or "scene-1"
+    safe = safe_name(raw_name, fallback="scene-1", max_len=80)
+    project_dir = get_project_dir(project_id)
+    chapter_file = project_dir / f"{safe_chapter}.md"
+    if not chapter_file.exists():
+        return {"error": f"Chapter '{safe_chapter}' not found"}, 404
+    chapter_dir = get_chapter_dir(project_id, safe_chapter)
     chapter_dir.mkdir(parents=True, exist_ok=True)
     filepath = chapter_dir / f"{safe}.md"
     if filepath.exists():
@@ -1592,11 +1715,16 @@ def get_stats(project_id):
 @app.route("/api/projects/<project_id>/stats", methods=["PUT"])
 def update_stats(project_id):
     """Update writing stats. Used to record sessions, set goals, etc."""
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
     data = safe_json()
     stats = load_stats(project_id)
     if "daily_goal" in data:
         try:
-            stats["daily_goal"] = int(data["daily_goal"])
+            goal = int(data["daily_goal"])
+            if not (0 <= goal <= 100000):
+                return {"error": "daily_goal must be between 0 and 100000"}, 400
+            stats["daily_goal"] = goal
         except (TypeError, ValueError):
             return {"error": "daily_goal must be an integer"}, 400
     if "session_start" in data:
@@ -1611,6 +1739,8 @@ def update_stats(project_id):
     if "words_written" in data:
         try:
             words = int(data["words_written"])
+            if not (0 <= words <= 1000000):
+                return {"error": "words_written must be between 0 and 1,000,000"}, 400
             # Clamp the addition (deletions don't subtract, they just don't add)
             delta = max(0, words)
             if stats.get("last_active_date") == today_iso():

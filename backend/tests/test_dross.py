@@ -339,8 +339,8 @@ class TestNewExportFormats:
 
 
 class TestDrossSystemPrompt:
-    def test_chat_uses_dross_persona(self, client):
-        """The /api/chat endpoint should include the Dross system prompt by default."""
+    def test_chat_uses_quill_persona(self, client):
+        """The /api/chat endpoint should include the Quill system prompt by default."""
         from slot_providers import PROVIDERS
         mock_instance = MagicMock()
         mock_instance.chat.return_value = "PONG"
@@ -352,11 +352,11 @@ class TestDrossSystemPrompt:
                 "stream": False,
             })
             assert r.status_code == 200
-            # The Dross system prompt should have been prepended
+            # The Quill system prompt should have been prepended
             call_args = mock_instance.chat.call_args
             messages = call_args[0][0]
             assert messages[0]["role"] == "system"
-            assert "Dross" in messages[0]["content"]
+            assert "Quill" in messages[0]["content"]
 
     def test_chat_email_intent_routes_to_email(self, client):
         """When the user says 'email the book to X', the chat should call the email tool directly."""
@@ -520,3 +520,184 @@ class TestOllamaToolCalling:
             stream=False
         )
         assert "tools" not in payload
+
+
+# --------------------------------------------------------------------------
+# Input validation (path safety)
+# --------------------------------------------------------------------------
+
+class TestInputValidation:
+    """Bug fixes: path traversal, slash in names, null content, etc."""
+
+    def test_safe_name_replaces_slash(self):
+        from server import safe_name
+        assert "/" not in safe_name("my/chapter")
+        # Should be safe to use as filename
+        assert safe_name("my/chapter") == "my-chapter"
+
+    def test_safe_name_rejects_path_traversal(self):
+        from server import safe_name
+        result = safe_name("../etc/passwd")
+        assert ".." not in result
+        assert "/" not in result
+
+    def test_safe_name_replaces_spaces(self):
+        from server import safe_name
+        assert safe_name("Chapter One") == "Chapter-One"
+
+    def test_safe_name_handles_unicode(self):
+        from server import safe_name
+        assert safe_name("café") == "café"
+        assert safe_name("日本語") == "日本語"
+
+    def test_safe_name_handles_empty(self):
+        from server import safe_name
+        assert safe_name("") == "untitled"
+        assert safe_name(None) == "untitled"
+        assert safe_name("   ") == "untitled"
+
+    def test_safe_name_handles_special_chars(self):
+        from server import safe_name
+        for char in '<>:"/\\|?*':
+            result = safe_name(f"a{char}b")
+            assert char not in result, f"safe_name didn't remove {char!r}"
+
+    def test_safe_name_collapses_dashes(self):
+        from server import safe_name
+        # Multiple consecutive dashes collapse
+        assert safe_name("a---b") == "a-b"
+        # Spaces become dashes first, then collapse
+        assert safe_name("a - - b") == "a-b"
+        # Tabs/newlines become dashes too
+        assert safe_name("a\t\tb") == "a-b"
+
+    def test_safe_name_length_limit(self):
+        from server import safe_name
+        long = "a" * 200
+        result = safe_name(long, max_len=50)
+        assert len(result) <= 50
+
+    def test_validate_project_id(self):
+        from server import validate_project_id
+        assert validate_project_id("book") == "book"
+        assert validate_project_id("book-1") == "book-1"
+        # Invalid
+        assert validate_project_id("") is None
+        assert validate_project_id("a/b") is None
+        assert validate_project_id("a\\b") is None
+        assert validate_project_id(".hidden") is None
+        assert validate_project_id("a" * 100) is None
+        assert validate_project_id(None) is None
+
+    def test_safe_content_handles_null(self):
+        from server import safe_content
+        assert safe_content(None) == ""
+        assert safe_content("") == ""
+        assert safe_content("hello") == "hello"
+        assert safe_content(123) == "123"
+
+    def test_create_chapter_sanitizes_name(self, client):
+        """Chapter names with slashes should be sanitized, not 500."""
+        r = client.post("/api/projects", json={"name": "bug-fix-test"})
+        pid = r.get_json()["id"]
+        # Slash in name should not crash
+        r = client.post(f"/api/projects/{pid}/chapters", json={"name": "my/chapter?"})
+        assert r.status_code == 200, f"Got {r.status_code}: {r.text}"
+        d = r.get_json()
+        assert "/" not in d["name"]
+
+    def test_create_chapter_with_path_traversal(self, client):
+        """Chapter names with .. should be sanitized."""
+        r = client.post("/api/projects", json={"name": "bug-fix-test2"})
+        pid = r.get_json()["id"]
+        r = client.post(f"/api/projects/{pid}/chapters", json={"name": "../etc/passwd"})
+        assert r.status_code == 200, f"Got {r.status_code}: {r.text}"
+        d = r.get_json()
+        assert ".." not in d["name"]
+        assert "/" not in d["name"]
+
+    def test_create_project_sanitizes_path_traversal(self, client):
+        """Project names with .. should be sanitized to safe names."""
+        r = client.post("/api/projects", json={"name": "../etc"})
+        # The name is sanitized to "etc" (a safe folder name, not a 400)
+        assert r.status_code == 200
+        d = r.get_json()
+        assert ".." not in d["id"]
+        assert "/" not in d["id"]
+        # Direct dot-slash should be rejected
+        r = client.post("/api/projects", json={"name": "../../../etc/passwd"})
+        assert r.status_code == 200
+        d = r.get_json()
+        assert ".." not in d["id"]
+
+    def test_compile_nonexistent_project_404(self, client):
+        r = client.get("/api/projects/nonexistent-xyz-12345/compile")
+        assert r.status_code == 404
+
+    def test_list_scenes_nonexistent_chapter_404(self, client):
+        r = client.post("/api/projects", json={"name": "scene-test"})
+        pid = r.get_json()["id"]
+        r = client.get(f"/api/projects/{pid}/chapters/nonexistent/scenes")
+        assert r.status_code == 404
+
+    def test_save_null_content_succeeds(self, client):
+        """Save with null content should default to empty string, not 500."""
+        r = client.post("/api/projects", json={"name": "null-content-test"})
+        pid = r.get_json()["id"]
+        r = client.post(f"/api/projects/{pid}/chapters", json={"name": "c1"})
+        # null content
+        r = client.put(f"/api/projects/{pid}/chapters/c1/content", json={"content": None})
+        assert r.status_code == 200
+        d = r.get_json()
+        assert d.get("bytes") == 0
+        # missing content
+        r = client.put(f"/api/projects/{pid}/chapters/c1/content", json={})
+        assert r.status_code == 200
+
+    def test_stats_bounds(self, client):
+        """Stats should validate bounds."""
+        r = client.post("/api/projects", json={"name": "stats-bounds-test"})
+        pid = r.get_json()["id"]
+        # Too high
+        r = client.put(f"/api/projects/{pid}/stats", json={"daily_goal": 10000000})
+        assert r.status_code == 400
+        # Negative
+        r = client.put(f"/api/projects/{pid}/stats", json={"daily_goal": -1})
+        assert r.status_code == 400
+        # Valid
+        r = client.put(f"/api/projects/{pid}/stats", json={"daily_goal": 1000})
+        assert r.status_code == 200
+
+    def test_delete_nonexistent_chapter_404(self, client):
+        r = client.post("/api/projects", json={"name": "del-test"})
+        pid = r.get_json()["id"]
+        r = client.delete(f"/api/projects/{pid}/chapters/nonexistent")
+        assert r.status_code == 404
+
+
+# --------------------------------------------------------------------------
+# Quill rename (replaces Dross references)
+# --------------------------------------------------------------------------
+
+class TestQuillRename:
+    def test_ai_assistant_says_quill(self, client):
+        """The /api/chat should use the Quill persona, not Dross."""
+        from slot_providers import PROVIDERS
+        mock_instance = MagicMock()
+        mock_instance.chat.return_value = "ok"
+        mock_instance.stream.return_value = iter(["ok"])
+        with patch.dict(PROVIDERS, {"minimax": MagicMock(return_value=mock_instance)}):
+            client.post("/api/slots/minimax-text/activate")
+            r = client.post("/api/chat", json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+            })
+            assert r.status_code == 200
+            msgs = mock_instance.chat.call_args[0][0]
+            assert "Quill" in msgs[0]["content"]
+            assert "Dross" not in msgs[0]["content"]
+
+    def test_chapter_writer_persona_is_quill(self):
+        from book_writer import CHAPTER_SYSTEM
+        assert "Quill" in CHAPTER_SYSTEM
+        assert "Dross" not in CHAPTER_SYSTEM

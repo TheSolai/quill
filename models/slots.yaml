@@ -7,9 +7,6 @@ slots:
   api_key: null
   options:
     temperature: 0.85
-    top_p: 0.92
-    top_k: 60
-    num_ctx: 8192
   purpose: creative
   category: creative
   tool_calling: true
@@ -20,7 +17,7 @@ slots:
     speed: fast
     quality: very_high
     notes: Apple Silicon MLX runtime via Ollama. Best default for literary prose.
-  created_at: 1784993425.320676
+  created_at: 1784994368.182167
 - id: gemma4-fast
   name: Gemma 4 8B (Local, fast)
   type: ollama
@@ -41,7 +38,7 @@ slots:
     speed: very_fast
     quality: high
     notes: Quick drafts. Lower quality but very fast.
-  created_at: 1784993425.320679
+  created_at: 1784994368.1821702
 - id: qwen3-30b
   name: Qwen 3 30B (Local, long-context)
   type: ollama
@@ -62,7 +59,7 @@ slots:
     speed: medium
     quality: very_high
     notes: 32K context. Best for long coherent arcs.
-  created_at: 1784993425.32068
+  created_at: 1784994368.1821709
 - id: gpt-oss-20b
   name: GPT-OSS 20B (Local, thinking)
   type: ollama
@@ -83,7 +80,7 @@ slots:
     speed: medium
     quality: very_high
     notes: 131K context, thinking-heavy. Good for outlines + structural review.
-  created_at: 1784993425.3206809
+  created_at: 1784994368.1821718
 - id: qwen-coder-30b
   name: Qwen 3 Coder 30B (Local, code)
   type: ollama
@@ -103,7 +100,7 @@ slots:
     speed: medium
     quality: highest
     notes: 262K context. For code generation.
-  created_at: 1784993425.320682
+  created_at: 1784994368.182173
 - id: llama3-70b
   name: Llama 3.3 70B (Local, epic)
   type: ollama
@@ -124,7 +121,7 @@ slots:
     speed: slow
     quality: highest
     notes: Epic-scale narratives. When quality matters most.
-  created_at: 1784993425.320683
+  created_at: 1784994368.182174
 - id: groq-tool-use
   name: Llama 3 Groq Tool-Use 8B (Local, agentic)
   type: ollama
@@ -146,7 +143,7 @@ slots:
     quality: high
     notes: Fine-tuned specifically for tool/function calling. Best for Dross as an
       autonomous agent.
-  created_at: 1784993425.320683
+  created_at: 1784994368.182174
 - id: minimax-text
   name: MiniMax Text 01 (Cloud)
   type: minimax
@@ -168,7 +165,7 @@ slots:
     quality: high
     notes: MiniMax's general-purpose text model. Requires MINIMAX_API_KEY env var.
     context: 128000
-  created_at: 1784993425.320684
+  created_at: 1784994368.182175
 - id: minimax-m27
   name: MiniMax M2.7 (Cloud, reasoning)
   type: minimax
@@ -191,7 +188,7 @@ slots:
     notes: M2.7 with thinking. Strong reasoning + 200K context. Needs ~500-1000 tokens
       of headroom for reasoning.
     context: 200000
-  created_at: 1784993425.320684
+  created_at: 1784994368.182176
 - id: minimax-highspeed
   name: MiniMax M2.7 Highspeed (Cloud, fast)
   type: minimax
@@ -213,4 +210,4 @@ slots:
     quality: high
     notes: Faster variant of M2.7. Lower latency, similar quality.
     context: 200000
-  created_at: 1784993425.3206851
+  created_at: 1784994368.182176

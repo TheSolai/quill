@@ -43,8 +43,14 @@ def _load_api_key() -> str:
     return ""
 
 
-# Default inbox for Dross
-DROSS_INBOX = "thedross@agentmail.to"
+# Default inbox for Quill (the AI writing partner)
+# Note: the underlying email address is thedross@agentmail.to because that's
+# the existing AgentMail account. The user-facing name is "Quill" — we set
+# the display name via the AgentMail API.
+QUILL_INBOX = "thedross@agentmail.to"
+QUILL_DISPLAY_NAME = "Quill"
+# Backward-compat alias — some code references DROSS_INBOX
+DROSS_INBOX = QUILL_INBOX
 
 # Lazy-load the SDK to keep startup fast
 _client = None

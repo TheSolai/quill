@@ -31,7 +31,7 @@ struct AIAssistantView: View {
                 Image(systemName: "sparkles")
                     .font(.system(size: 13))
                     .foregroundColor(accent)
-                Text("DROSS")
+                Text("QUILL")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundColor(accent)
                 Spacer()
@@ -329,7 +329,7 @@ struct MessageBubble: View {
 }
 
 // MARK: - Inbox badge
-// Shows how many recent emails are in the Dross inbox. Click to refresh.
+// Shows how many recent emails are in the Quill inbox. Click to refresh.
 
 struct InboxBadge: View {
     let accent: Color
@@ -349,7 +349,7 @@ struct InboxBadge: View {
                         .foregroundColor(accent)
                 }
             }
-            .help("Dross inbox (\(count) recent) — click to refresh")
+            .help("Quill inbox (\(count) recent) — click to refresh")
         }
         .buttonStyle(.plain)
         .onAppear { refresh() }

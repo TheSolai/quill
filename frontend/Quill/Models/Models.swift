@@ -569,7 +569,7 @@ class AppState: ObservableObject {
                 "content": "[CONTEXT] Target chapter: \(chapter).md. Project style: \(style.isEmpty ? "literary, vivid prose" : style)",
             ])
         }
-        // Prepend existing current chapter content so Dross can continue it
+        // Prepend existing current chapter content so Quill can continue it
         if !chapterContent.isEmpty && !chapter.isEmpty {
             let preview = String(chapterContent.prefix(2000))
             enhancedHistory.append([
@@ -587,10 +587,11 @@ class AppState: ObservableObject {
 
         let assistantMsg = ChatMessage(role: .assistant, content: "", isStreaming: true)
         messages.append(assistantMsg)
+        let assistantMsgId = assistantMsg.id  // capture for async updates
         isStreaming = true
         streamBuffer = ""
 
-        // Track if Dross wrote to a chapter file (so we can refresh the editor)
+        // Track if Quill wrote to a chapter file (so we can refresh the editor)
         var chapterWritten: String? = nil
 
         do {
@@ -600,10 +601,11 @@ class AppState: ObservableObject {
                 onToken: { [weak self] token in
                     Task { @MainActor in
                         guard let self = self else { return }
+                        // Find the streaming message by id (avoids race with popLast/append
+                        // when multiple async tokens could fire concurrently)
                         self.streamBuffer += token
-                        if var last = self.messages.popLast() {
-                            last.content = self.streamBuffer
-                            self.messages.append(last)
+                        if let idx = self.messages.firstIndex(where: { $0.id == assistantMsgId }) {
+                            self.messages[idx].content = self.streamBuffer
                         }
                     }
                 },
@@ -611,15 +613,14 @@ class AppState: ObservableObject {
                     Task { @MainActor in
                         guard let self = self else { return }
                         self.isStreaming = false
-                        if var last = self.messages.popLast() {
-                            last.isStreaming = false
-                            self.messages.append(last)
+                        if let idx = self.messages.firstIndex(where: { $0.id == assistantMsgId }) {
+                            self.messages[idx].isStreaming = false
                         }
-                        // If Dross wrote to a chapter, refresh the editor
+                        // If Quill wrote to a chapter, refresh the editor
                         if let written = meta["chapter_written"] as? String,
                            let pid = meta["project_id"] as? String {
                             chapterWritten = written
-                            print("[Quill] Dross wrote to chapter: \(written)")
+                            print("[Quill] Quill wrote to chapter: \(written)")
                             // Reload the chapter into the editor
                             if self.currentChapter?.name == written || self.currentChapter == nil {
                                 if let ch = self.chapters.first(where: { $0.name == written }) {
@@ -634,7 +635,7 @@ class AppState: ObservableObject {
                             // Show a confirmation in the chat
                             let confirm = ChatMessage(
                                 role: .system,
-                                content: "✓ Dross wrote to `\(written).md` — open the chapter to read it."
+                                content: "✓ Quill wrote to `\(written).md` — open the chapter to read it."
                             )
                             self.messages.append(confirm)
                         }
@@ -651,11 +652,11 @@ class AppState: ObservableObject {
                     Task { @MainActor in
                         guard let self = self else { return }
                         self.isStreaming = false
-                        if var last = self.messages.popLast() {
-                            last.content = (last.content.isEmpty ? "" : last.content)
+                        if let idx = self.messages.firstIndex(where: { $0.id == assistantMsgId }) {
+                            let cur = self.messages[idx].content
+                            self.messages[idx].content = (cur.isEmpty ? "" : cur)
                                 + "\n[error: \(err)]"
-                            last.isStreaming = false
-                            self.messages.append(last)
+                            self.messages[idx].isStreaming = false
                         }
                     }
                 }
@@ -663,10 +664,9 @@ class AppState: ObservableObject {
         } catch {
             await MainActor.run {
                 isStreaming = false
-                if var last = messages.popLast() {
-                    last.isStreaming = false
-                    last.content += "\n[error: \(error.localizedDescription)]"
-                    messages.append(last)
+                if let idx = self.messages.firstIndex(where: { $0.id == assistantMsgId }) {
+                    self.messages[idx].isStreaming = false
+                    self.messages[idx].content += "\n[error: \(error.localizedDescription)]"
                 }
             }
         }
