@@ -76,6 +76,79 @@ struct ProjectSettings: Codable {
     }
 }
 
+// MARK: - Scene (sub-chapter)
+struct Scene: Identifiable, Codable, Hashable {
+    var id: String { name }
+    let name: String
+    let path: String
+    let modified: Double
+    let size: Int
+}
+
+struct SceneContent: Codable {
+    let name: String
+    let content: String
+    let path: String
+}
+
+// MARK: - Story Bible / Codex
+struct Codex: Codable {
+    var characters: String
+    var world: String
+    var summary: String
+    var style: String
+    var plot: String
+    var themes: String
+}
+
+// MARK: - Stats
+struct WritingStats: Codable {
+    var dailyGoal: Int
+    var wordsToday: Int
+    var totalWords: Int
+    var lastSessionStart: String?
+    var sessions: [SessionRecord]
+    var lastActiveDate: String?
+
+    enum CodingKeys: String, CodingKey {
+        case dailyGoal = "daily_goal"
+        case wordsToday = "words_today"
+        case totalWords = "total_words"
+        case lastSessionStart = "last_session_start"
+        case sessions
+        case lastActiveDate = "last_active_date"
+    }
+
+    init() {
+        self.dailyGoal = 500
+        self.wordsToday = 0
+        self.totalWords = 0
+        self.lastSessionStart = nil
+        self.sessions = []
+        self.lastActiveDate = nil
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.dailyGoal = try c.decodeIfPresent(Int.self, forKey: .dailyGoal) ?? 500
+        self.wordsToday = try c.decodeIfPresent(Int.self, forKey: .wordsToday) ?? 0
+        self.totalWords = try c.decodeIfPresent(Int.self, forKey: .totalWords) ?? 0
+        self.lastSessionStart = try c.decodeIfPresent(String.self, forKey: .lastSessionStart)
+        self.sessions = try c.decodeIfPresent([SessionRecord].self, forKey: .sessions) ?? []
+        self.lastActiveDate = try c.decodeIfPresent(String.self, forKey: .lastActiveDate)
+    }
+}
+
+struct SessionRecord: Codable {
+    let start: String
+    let end: String
+}
+
+// MARK: - Synopsis
+struct Synopsis: Codable {
+    var synopsis: String
+}
+
 // MARK: - Compile Preview
 struct CompilePreview: Codable {
     let title: String
@@ -262,6 +335,202 @@ class AppState: ObservableObject {
                 chapterContent = ""
             }
             await loadChapters()
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    // ---- Scenes (sub-chapters) ----------------------------------------
+
+    @Published var scenes: [Scene] = []
+    @Published var currentScene: Scene?
+    @Published var sceneContent: String = ""
+
+    func loadScenes() async {
+        guard let project = currentProject, let chapter = currentChapter else {
+            scenes = []
+            return
+        }
+        do {
+            scenes = try await BackendService.shared.get(
+                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes"
+            )
+        } catch {
+            scenes = []
+            backendError = error.localizedDescription
+        }
+    }
+
+    func selectScene(_ scene: Scene) async {
+        guard let project = currentProject, let chapter = currentChapter else { return }
+        do {
+            let content: SceneContent = try await BackendService.shared.get(
+                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(scene.name)/content"
+            )
+            currentScene = scene
+            sceneContent = content.content
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    func saveCurrentScene() async {
+        guard let project = currentProject, let chapter = currentChapter, let scene = currentScene else { return }
+        do {
+            try await BackendService.shared.put(
+                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(scene.name)/content",
+                body: ["content": sceneContent]
+            )
+            statusMessage = "Scene saved"
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    func createScene(name: String) async {
+        guard let project = currentProject, let chapter = currentChapter else { return }
+        do {
+            let _: [String: String] = try await BackendService.shared.post(
+                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes",
+                body: ["name": name]
+            )
+            await loadScenes()
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    // ---- Story Bible / Codex -------------------------------------------
+
+    @Published var codex: Codex = Codex(
+        characters: "", world: "", summary: "", style: "", plot: "", themes: ""
+    )
+
+    func loadCodex() async {
+        guard let project = currentProject else { return }
+        do {
+            codex = try await BackendService.shared.get(
+                "/api/projects/\(project.id)/codex"
+            )
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    func saveCodex() async {
+        guard let project = currentProject else { return }
+        do {
+            try await BackendService.shared.put(
+                "/api/projects/\(project.id)/codex",
+                body: [
+                    "characters": codex.characters,
+                    "world": codex.world,
+                    "summary": codex.summary,
+                    "style": codex.style,
+                    "plot": codex.plot,
+                    "themes": codex.themes,
+                ]
+            )
+            statusMessage = "Story Bible saved"
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    // ---- Stats + writing goals -----------------------------------------
+
+    @Published var stats: WritingStats = WritingStats()
+    @Published var sessionStartTime: Date?
+    @Published var sessionWordsWritten: Int = 0
+
+    func loadStats() async {
+        guard currentProject != nil else { return }
+        do {
+            stats = try await BackendService.shared.get(
+                "/api/projects/\(currentProject!.id)/stats"
+            )
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    func startSession() async {
+        guard currentProject != nil else { return }
+        let iso = ISO8601DateFormatter().string(from: Date())
+        do {
+            _ = try await BackendService.shared.put(
+                "/api/projects/\(currentProject!.id)/stats",
+                body: ["session_start": iso]
+            );
+            sessionStartTime = Date()
+            sessionWordsWritten = 0
+        } catch {
+            // silent
+        }
+    }
+
+    func endSession() async {
+        guard currentProject != nil, let start = sessionStartTime else { return }
+        let elapsed = Date().timeIntervalSince(start)
+        if elapsed > 5 && sessionWordsWritten > 0 {
+            let iso = ISO8601DateFormatter().string(from: Date())
+            do {
+                _ = try await BackendService.shared.put(
+                    "/api/projects/\(currentProject!.id)/stats",
+                    body: ["session_end": iso]
+                );
+            } catch {}
+        }
+        sessionStartTime = nil
+    }
+
+    func setDailyGoal(_ goal: Int) async {
+        guard currentProject != nil else { return }
+        do {
+            _ = try await BackendService.shared.put(
+                "/api/projects/\(currentProject!.id)/stats",
+                body: ["daily_goal": goal]
+            );
+            stats.dailyGoal = goal
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    // ---- Synopsis (corkboard) ------------------------------------------
+
+    @Published var synopses: [String: String] = [:]
+
+    func loadAllSynopses() async {
+        guard let project = currentProject else { return }
+        var loaded: [String: String] = [:]
+        for chapter in chapters {
+            do {
+                let s: Synopsis = try await BackendService.shared.get(
+                    "/api/projects/\(project.id)/chapters/\(chapter.name)/synopsis"
+                )
+                if !s.synopsis.isEmpty {
+                    loaded[chapter.name] = s.synopsis
+                }
+            } catch {
+                // ignore
+            }
+        }
+        synopses = loaded
+    }
+
+    func setSynopsis(_ chapterName: String, synopsis: String) async {
+        guard let project = currentProject else { return }
+        do {
+            _ = try await BackendService.shared.put(
+                "/api/projects/\(project.id)/chapters/\(chapterName)/synopsis",
+                body: ["synopsis": synopsis]
+            );
+            if synopsis.isEmpty {
+                synopses.removeValue(forKey: chapterName)
+            } else {
+                synopses[chapterName] = synopsis
+            }
         } catch {
             backendError = error.localizedDescription
         }

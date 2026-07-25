@@ -35,7 +35,10 @@ def get_project_dir(project_id):
 
 def list_markdown_files(project_id):
     project_dir = get_project_dir(project_id)
-    files = sorted(project_dir.glob("*.md"), key=lambda p: natural_sort_key(p.stem))
+    files = sorted(
+        [f for f in project_dir.glob("*.md") if f.is_file()],
+        key=lambda p: natural_sort_key(p.stem)
+    )
     return [
         {"name": f.stem, "path": str(f), "modified": os.path.getmtime(f), "size": os.path.getsize(f)}
         for f in files
@@ -326,6 +329,9 @@ def compile_book(project_id):
     body = []
     included = []
     for ch in chapters:
+        # Skip chapter subdirectories at the top level — they contain scenes
+        if ch.is_dir():
+            continue
         content = ch.read_text(encoding="utf-8")
         # Strip leading whitespace and split into lines
         lines = [l for l in content.splitlines() if l.strip()]
@@ -335,6 +341,23 @@ def compile_book(project_id):
         if len(non_heading_lines) == 0:
             # Empty chapter (just heading) — skip
             continue
+
+        # Append scenes (sub-chapter files in chapter-NN/) as H2 sub-sections
+        chapter_name = ch.stem
+        scene_dir = project_dir / chapter_name
+        if scene_dir.is_dir():
+            scenes = sorted(scene_dir.glob("scene-*.md"), key=lambda p: natural_sort_key(p.stem))
+            for scene_path in scenes:
+                scene_content = scene_path.read_text(encoding="utf-8")
+                # Promote scene's # heading to ## (subsection of chapter)
+                scene_lines = scene_content.split("\n", 1)
+                if scene_lines and scene_lines[0].startswith("# "):
+                    scene_title = scene_lines[0][2:].strip()
+                    rest = scene_lines[1] if len(scene_lines) > 1 else ""
+                    content += f"\n\n## {scene_title}\n{rest}"
+                else:
+                    content += f"\n\n{scene_content}"
+
         body.append(content)
         included.append(ch)
 
@@ -371,12 +394,13 @@ def get_compile_preview(project_id):
 
 @app.route("/api/projects/<project_id>/export/<format>", methods=["GET"])
 def export_book(project_id, format):
-    if format not in ["pdf", "docx", "md", "txt"]:
-        return {"error": "Unknown format"}, 400
+    if format not in ["pdf", "docx", "md", "txt", "html", "epub"]:
+        return {"error": f"Unknown format. Use: pdf, docx, md, txt, html, epub"}, 400
 
-    compiled, title, _, _ = compile_book(project_id)
+    compiled, title, ctx, _ = compile_book(project_id)
     project_dir = get_project_dir(project_id)
     safe_title = re.sub(r'[^\w\- ]', '', title).strip().replace(' ', '-')
+    author = ctx.get("author", "")
 
     output_dir = project_dir / "exports"
     output_dir.mkdir(exist_ok=True)
@@ -422,6 +446,247 @@ def export_book(project_id, format):
     elif format == "pdf":
         return {"error": "PDF requires pandoc + weasyprint/wkhtmltopdf"}, 500
 
+    elif format == "html":
+        # Convert markdown → HTML using a built-in minimal converter
+        # (we don't depend on pandoc for HTML; keep the conversion in-process)
+        html_body = markdown_to_html(compiled)
+        html_doc = build_html_document(title, author, html_body, ctx)
+        html_path = output_dir / f"{safe_title}.html"
+        html_path.write_text(html_doc, encoding="utf-8")
+        return send_file(str(html_path), mimetype="text/html",
+                         as_attachment=True, download_name=f"{safe_title}.html")
+
+    elif format == "epub":
+        # ePub via pandoc (industry standard)
+        epub_path = output_dir / f"{safe_title}.epub"
+        md_temp = output_dir / f"{safe_title}-temp.md"
+        # Pandoc needs a proper title in the metadata
+        md_with_meta = (
+            f"---\n"
+            f"title: {json.dumps(title)}\n"
+            f"author: {json.dumps(author)}\n"
+            f"---\n\n"
+            + compiled
+        )
+        md_temp.write_text(md_with_meta, encoding="utf-8")
+        try:
+            result = subprocess.run(
+                ["pandoc", str(md_temp), "-o", str(epub_path),
+                 "--from", "markdown", "--to", "epub3",
+                 "--standalone", "--toc"],
+                capture_output=True, text=True, timeout=180
+            )
+            md_temp.unlink()
+            if result.returncode != 0:
+                return {"error": f"Pandoc ePub error: {result.stderr}"}, 500
+        except subprocess.TimeoutExpired:
+            return {"error": "ePub export timed out"}, 500
+        except FileNotFoundError:
+            return {"error": "Pandoc not found (required for ePub)"}, 500
+        return send_file(str(epub_path), mimetype="application/epub+zip",
+                         as_attachment=True, download_name=f"{safe_title}.epub")
+
+
+# ---- HTML conversion -------------------------------------------------------
+
+def markdown_to_html(md: str) -> str:
+    """Minimal but robust markdown → HTML converter.
+    Handles: headings, bold, italic, code, links, blockquotes, lists, hrules, paragraphs.
+    Does NOT handle: tables, images (passes through), nested lists beyond 2 levels.
+    """
+    html_lines = []
+    in_para = False
+    in_code = False
+    in_list = False
+    list_type = None  # 'ul' or 'ol'
+
+    def close_para():
+        nonlocal in_para
+        if in_para:
+            html_lines.append("</p>")
+            in_para = False
+
+    def close_list():
+        nonlocal in_list, list_type
+        if in_list:
+            html_lines.append(f"</{list_type}>")
+            in_list = False
+            list_type = None
+
+    lines = md.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Code block
+        if stripped.startswith("```"):
+            if in_code:
+                html_lines.append("</code></pre>")
+                in_code = False
+            else:
+                close_para()
+                close_list()
+                html_lines.append("<pre><code>")
+                in_code = True
+            i += 1
+            continue
+        if in_code:
+            html_lines.append(line.replace("<", "&lt;").replace(">", "&gt;"))
+            i += 1
+            continue
+
+        # Headings
+        m = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if m:
+            close_para()
+            close_list()
+            level = len(m.group(1))
+            content = inline_md(m.group(2))
+            html_lines.append(f"<h{level}>{content}</h{level}>")
+            i += 1
+            continue
+
+        # Horizontal rule
+        if re.match(r"^[-*_]{3,}$", stripped):
+            close_para()
+            close_list()
+            html_lines.append("<hr>")
+            i += 1
+            continue
+
+        # Blockquote
+        if stripped.startswith("> "):
+            close_para()
+            close_list()
+            content = inline_md(stripped[2:])
+            html_lines.append(f"<blockquote>{content}</blockquote>")
+            i += 1
+            continue
+
+        # LaTeX commands (skip in HTML — they came from compile_book front matter)
+        if stripped.startswith("\\"):
+            i += 1
+            continue
+
+        # Front-matter delimiter (--- at start)
+        if stripped == "---":
+            i += 1
+            continue
+
+        # Unordered list
+        if re.match(r"^[\-\*]\s+", stripped):
+            if not in_list or list_type != "ul":
+                close_para()
+                close_list()
+                html_lines.append("<ul>")
+                in_list = True
+                list_type = "ul"
+            content = inline_md(re.sub(r"^[\-\*]\s+", "", stripped))
+            html_lines.append(f"<li>{content}</li>")
+            i += 1
+            continue
+
+        # Ordered list
+        if re.match(r"^\d+\.\s+", stripped):
+            if not in_list or list_type != "ol":
+                close_para()
+                close_list()
+                html_lines.append("<ol>")
+                in_list = True
+                list_type = "ol"
+            content = inline_md(re.sub(r"^\d+\.\s+", "", stripped))
+            html_lines.append(f"<li>{content}</li>")
+            i += 1
+            continue
+
+        # Blank line — close paragraph and list
+        if not stripped:
+            close_para()
+            close_list()
+            i += 1
+            continue
+
+        # Paragraph content
+        if not in_para:
+            close_list()
+            html_lines.append("<p>")
+            in_para = True
+        else:
+            html_lines.append(" ")
+        html_lines.append(inline_md(stripped))
+        i += 1
+
+    close_para()
+    close_list()
+    return "\n".join(html_lines)
+
+
+def inline_md(text: str) -> str:
+    """Convert inline markdown (bold, italic, code, links)."""
+    # Escape HTML first
+    s = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Code
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    # Bold
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
+    s = re.sub(r"__([^_]+)__", r"<strong>\1</strong>", s)
+    # Italic
+    s = re.sub(r"\*([^*]+)\*", r"<em>\1</em>", s)
+    s = re.sub(r"(?<!\w)_([^_]+)_(?!\w)", r"<em>\1</em>", s)
+    # Links
+    s = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', s)
+    return s
+
+
+def build_html_document(title, author, body, ctx):
+    """Build a complete standalone HTML document."""
+    style = ctx.get("style", "")
+    genre = ctx.get("genre", "")
+    css = """\
+* { box-sizing: border-box; }
+body {
+  font-family: Georgia, 'Iowan Old Style', 'Charter', serif;
+  font-size: 18px;
+  line-height: 1.7;
+  color: #222;
+  background: #fafaf8;
+  max-width: 38em;
+  margin: 3em auto;
+  padding: 0 1.5em;
+}
+h1 { font-size: 2.4em; margin: 1.4em 0 0.4em; text-align: center; }
+h2 { font-size: 1.7em; margin: 1.6em 0 0.5em; border-bottom: 1px solid #ddd; padding-bottom: 0.2em; }
+h3 { font-size: 1.3em; margin: 1.4em 0 0.4em; }
+.author { text-align: center; font-style: italic; color: #666; margin: 0; }
+.genre { text-align: center; font-size: 0.9em; color: #888; margin: 0.2em 0 2em; }
+blockquote { border-left: 3px solid #ccc; margin: 1em 0; padding: 0.5em 1em; color: #555; font-style: italic; }
+pre, code { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 0.9em; background: #f3f3f1; }
+pre { padding: 1em; border-radius: 4px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+hr { border: 0; border-top: 1px solid #ddd; margin: 2em 0; }
+a { color: #2c5aa0; text-decoration: none; }
+a:hover { text-decoration: underline; }
+"""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<meta name="author" content="{author}">
+<meta name="generator" content="Quill">
+<style>{css}</style>
+</head>
+<body>
+<h1>{title}</h1>
+<p class="author">by {author}</p>
+<p class="genre">{genre}</p>
+<hr>
+{body}
+</body>
+</html>
+"""
+
 
 @app.route("/api/projects/<project_id>/settings", methods=["GET"])
 def get_settings(project_id):
@@ -447,6 +712,207 @@ def update_settings(project_id):
             ctx[key] = data[key]
     save_project_context(project_id, ctx)
     return ctx
+
+
+# ---- Scenes (sub-chapters within a chapter) ---------------------------------
+
+def get_chapter_dir(project_id: str, chapter_name: str) -> Path:
+    """Get the directory for a chapter's scenes: <project>/chapter-NN/."""
+    return get_project_dir(project_id) / chapter_name
+
+
+def list_scenes(project_id: str, chapter_name: str):
+    """List scene files for a chapter. Stored as <project>/chapter-NN/scene-NN.md."""
+    chapter_dir = get_chapter_dir(project_id, chapter_name)
+    if not chapter_dir.exists():
+        return []
+    files = sorted(chapter_dir.glob("scene-*.md"), key=lambda p: natural_sort_key(p.stem))
+    return [
+        {"name": f.stem, "path": str(f), "modified": os.path.getmtime(f), "size": os.path.getsize(f)}
+        for f in files
+    ]
+
+
+@app.route("/api/projects/<project_id>/chapters/<chapter_name>/scenes", methods=["GET"])
+def get_scenes(project_id, chapter_name):
+    return list_scenes(project_id, chapter_name)
+
+
+@app.route("/api/projects/<project_id>/chapters/<chapter_name>/scenes", methods=["POST"])
+def create_scene(project_id, chapter_name):
+    data = safe_json()
+    raw_name = (data.get("name") or "scene-1").strip()
+    safe = raw_name.replace(" ", "-").replace(".md", "").replace("/", "-")
+    chapter_dir = get_chapter_dir(project_id, chapter_name)
+    chapter_dir.mkdir(parents=True, exist_ok=True)
+    filepath = chapter_dir / f"{safe}.md"
+    if filepath.exists():
+        return {"error": "Scene already exists"}, 409
+    filepath.write_text(f"# {safe.replace('-', ' ').title()}\n\n", encoding="utf-8")
+    return {"name": safe, "path": str(filepath), "chapter": chapter_name}
+
+
+@app.route("/api/projects/<project_id>/chapters/<chapter_name>/scenes/<scene_name>/content", methods=["GET"])
+def get_scene_content(project_id, chapter_name, scene_name):
+    name = scene_name.replace(".md", "")
+    fp = get_chapter_dir(project_id, chapter_name) / f"{name}.md"
+    if not fp.exists():
+        return {"error": "Not found"}, 404
+    return {"name": name, "content": fp.read_text(encoding="utf-8"), "path": str(fp)}
+
+
+@app.route("/api/projects/<project_id>/chapters/<chapter_name>/scenes/<scene_name>/content", methods=["PUT"])
+def save_scene_content(project_id, chapter_name, scene_name):
+    data = safe_json()
+    name = scene_name.replace(".md", "")
+    chapter_dir = get_chapter_dir(project_id, chapter_name)
+    chapter_dir.mkdir(parents=True, exist_ok=True)
+    (chapter_dir / f"{name}.md").write_text(data.get("content", ""), encoding="utf-8")
+    return {"ok": True}
+
+
+@app.route("/api/projects/<project_id>/chapters/<chapter_name>/scenes/<scene_name>", methods=["DELETE"])
+def delete_scene(project_id, chapter_name, scene_name):
+    name = scene_name.replace(".md", "")
+    fp = get_chapter_dir(project_id, chapter_name) / f"{name}.md"
+    if fp.exists():
+        fp.unlink()
+    return {"ok": True}
+
+
+# ---- Story Bible / Codex ---------------------------------------------------
+
+@app.route("/api/projects/<project_id>/codex", methods=["GET"])
+def get_codex(project_id):
+    """Return the structured Story Bible: characters, world, summary, style, plot."""
+    ctx = get_project_context(project_id)
+    return {
+        "characters": ctx.get("characters", ""),
+        "world": ctx.get("world", ""),
+        "summary": ctx.get("summary", ""),
+        "style": ctx.get("style", ""),
+        "plot": ctx.get("plot", ""),
+        "themes": ctx.get("themes", ""),
+    }
+
+
+@app.route("/api/projects/<project_id>/codex", methods=["PUT"])
+def update_codex(project_id):
+    """Update the Story Bible fields. Only provided fields are updated."""
+    data = safe_json()
+    ctx = get_project_context(project_id)
+    for key in ["characters", "world", "summary", "style", "plot", "themes"]:
+        if key in data and isinstance(data[key], str):
+            ctx[key] = data[key]
+    save_project_context(project_id, ctx)
+    return {
+        "characters": ctx.get("characters", ""),
+        "world": ctx.get("world", ""),
+        "summary": ctx.get("summary", ""),
+        "style": ctx.get("style", ""),
+        "plot": ctx.get("plot", ""),
+        "themes": ctx.get("themes", ""),
+    }
+
+
+# ---- Session stats + writing goals -----------------------------------------
+
+def get_stats_file(project_id: str) -> Path:
+    return get_project_dir(project_id) / ".quill_stats.json"
+
+
+def load_stats(project_id: str) -> dict:
+    f = get_stats_file(project_id)
+    if f.exists():
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {
+        "daily_goal": 500,
+        "words_today": 0,
+        "total_words": 0,
+        "last_session_start": None,
+        "sessions": [],  # list of {start, end, words_written}
+        "last_active_date": None,
+    }
+
+
+def save_stats(project_id: str, stats: dict):
+    get_stats_file(project_id).write_text(json.dumps(stats, indent=2), encoding="utf-8")
+
+
+def today_iso() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+@app.route("/api/projects/<project_id>/stats", methods=["GET"])
+def get_stats(project_id):
+    stats = load_stats(project_id)
+    # Recompute words_today if the last active date is different
+    if stats.get("last_active_date") != today_iso():
+        stats["words_today"] = 0
+    return stats
+
+
+@app.route("/api/projects/<project_id>/stats", methods=["PUT"])
+def update_stats(project_id):
+    """Update writing stats. Used to record sessions, set goals, etc."""
+    data = safe_json()
+    stats = load_stats(project_id)
+    if "daily_goal" in data:
+        try:
+            stats["daily_goal"] = int(data["daily_goal"])
+        except (TypeError, ValueError):
+            return {"error": "daily_goal must be an integer"}, 400
+    if "session_start" in data:
+        stats["last_session_start"] = data["session_start"]
+    if "session_end" in data:
+        if stats.get("last_session_start"):
+            stats["sessions"].append({
+                "start": stats["last_session_start"],
+                "end": data["session_end"],
+            })
+            stats["last_session_start"] = None
+    if "words_written" in data:
+        try:
+            words = int(data["words_written"])
+            # Clamp the addition (deletions don't subtract, they just don't add)
+            delta = max(0, words)
+            if stats.get("last_active_date") == today_iso():
+                stats["words_today"] = stats.get("words_today", 0) + delta
+            else:
+                stats["words_today"] = delta
+            stats["last_active_date"] = today_iso()
+            stats["total_words"] = stats.get("total_words", 0) + delta
+        except (TypeError, ValueError):
+            pass
+    save_stats(project_id, stats)
+    return stats
+
+
+# ---- Corkboard / Synopsis -------------------------------------------------
+
+@app.route("/api/projects/<project_id>/chapters/<chapter_name>/synopsis", methods=["GET"])
+def get_synopsis(project_id, chapter_name):
+    """Get the one-line synopsis for a chapter (used in corkboard view)."""
+    name = chapter_name.replace(".md", "")
+    ctx = get_project_context(project_id)
+    synopses = ctx.get("synopses", {})
+    return {"synopsis": synopses.get(name, "")}
+
+
+@app.route("/api/projects/<project_id>/chapters/<chapter_name>/synopsis", methods=["PUT"])
+def set_synopsis(project_id, chapter_name):
+    """Set the one-line synopsis for a chapter (used in corkboard view)."""
+    name = chapter_name.replace(".md", "")
+    data = safe_json()
+    ctx = get_project_context(project_id)
+    synopses = ctx.get("synopses", {})
+    synopses[name] = data.get("synopsis", "")
+    ctx["synopses"] = synopses
+    save_project_context(project_id, ctx)
+    return {"synopsis": synopses[name]}
 
 
 @app.route("/api/tasks", methods=["POST"])

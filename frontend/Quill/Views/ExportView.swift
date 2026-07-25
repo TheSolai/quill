@@ -23,7 +23,7 @@ struct ExportView: View {
     @State private var activeTab: ExportTab = .preview
 
     enum ExportFormat: String, CaseIterable, Identifiable {
-        case pdf = "PDF", docx = "DOCX", md = "Markdown", txt = "Plain Text"
+        case pdf = "PDF", docx = "DOCX", md = "Markdown", txt = "Plain Text", html = "HTML", epub = "ePub"
 
         var id: String { rawValue }
 
@@ -33,6 +33,8 @@ struct ExportView: View {
             case .docx: return "doc.richtext.fill"
             case .md: return "doc.plaintext.fill"
             case .txt: return "doc.text.fill"
+            case .html: return "globe"
+            case .epub: return "book.closed.fill"
             }
         }
 
@@ -42,6 +44,8 @@ struct ExportView: View {
             case .docx: return "Microsoft Word document"
             case .md: return "Raw markdown, all chapters merged"
             case .txt: return "Plain text, no formatting"
+            case .html: return "Standalone web page, styled for reading"
+            case .epub: return "E-book format for Kindle, iBooks, etc."
             }
         }
     }

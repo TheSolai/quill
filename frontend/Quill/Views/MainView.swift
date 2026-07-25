@@ -9,6 +9,8 @@ struct MainView: View {
     @State private var newProjectName = ""
     @State private var showNewChapter = false
     @State private var newChapterName = ""
+    @State private var viewMode: SidebarView.ViewMode = .editor
+    @State private var showStoryBible: Bool = false
 
     let bgPrimary = Color(hex: "1e1e2e")
     let bgSecondary = Color(hex: "181825")
@@ -34,21 +36,53 @@ struct MainView: View {
                     newProjectName: $newProjectName,
                     showNewChapter: $showNewChapter,
                     newChapterName: $newChapterName,
-                    width: sidebarWidth
+                    width: sidebarWidth,
+                    viewMode: viewMode,
+                    showStoryBible: $showStoryBible
                 )
                 .frame(width: sidebarWidth)
 
-                EditorView(
-                    state: state,
-                    bgPrimary: bgPrimary,
-                    bgSecondary: bgSecondary,
-                    accent: accent,
-                    accentDim: accentDim,
-                    textPrimary: textPrimary,
-                    textSecondary: textSecondary,
-                    textMuted: textMuted,
-                    border: border
-                )
+                // Center: switch between Editor, Corkboard, Story Bible
+                Group {
+                    if showStoryBible {
+                        StoryBibleView(
+                            state: state,
+                            bgPrimary: bgPrimary,
+                            bgSecondary: bgSecondary,
+                            accent: accent,
+                            textPrimary: textPrimary,
+                            textSecondary: textSecondary,
+                            textMuted: textMuted,
+                            border: border
+                        )
+                    } else if viewMode == .corkboard {
+                        CorkboardView(
+                            state: state,
+                            bgPrimary: bgPrimary,
+                            bgSecondary: bgSecondary,
+                            accent: accent,
+                            textPrimary: textPrimary,
+                            textSecondary: textSecondary,
+                            textMuted: textMuted,
+                            border: border,
+                            onSelectChapter: { chapter in
+                                Task { await state.selectChapter(chapter) }
+                            }
+                        )
+                    } else {
+                        EditorView(
+                            state: state,
+                            bgPrimary: bgPrimary,
+                            bgSecondary: bgSecondary,
+                            accent: accent,
+                            accentDim: accentDim,
+                            textPrimary: textPrimary,
+                            textSecondary: textSecondary,
+                            textMuted: textMuted,
+                            border: border
+                        )
+                    }
+                }
 
                 AIAssistantView(
                     state: state,

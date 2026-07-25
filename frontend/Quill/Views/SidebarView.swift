@@ -13,6 +13,23 @@ struct SidebarView: View {
     @Binding var showNewChapter: Bool
     @Binding var newChapterName: String
     let width: CGFloat
+    let viewMode: ViewMode
+    @Binding var showStoryBible: Bool
+
+    enum ViewMode: String, CaseIterable, Identifiable {
+        case editor = "Outline"
+        case corkboard = "Corkboard"
+        case storyBible = "Story Bible"
+        var id: String { rawValue }
+
+        var icon: String {
+            switch self {
+            case .editor: return "list.bullet"
+            case .corkboard: return "rectangle.grid.2x2"
+            case .storyBible: return "book.closed.fill"
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,6 +55,37 @@ struct SidebarView: View {
 
             Divider().background(border)
 
+            // View mode picker
+            HStack(spacing: 4) {
+                ForEach(ViewMode.allCases) { mode in
+                    Button(action: {
+                        if mode == .storyBible {
+                            showStoryBible = true
+                        } else {
+                            showStoryBible = false
+                        }
+                        // Use the binding pattern
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: mode.icon)
+                                .font(.system(size: 9))
+                            Text(mode.rawValue)
+                                .font(.system(size: 10))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(viewMode == mode ? accent.opacity(0.2) : Color.clear)
+                        .foregroundColor(viewMode == mode ? accent : textMuted)
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider().background(border)
+
             VStack(alignment: .leading, spacing: 4) {
                 Text("PROJECTS")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -52,7 +100,7 @@ struct SidebarView: View {
                         }
                     }
                 }
-                .frame(maxHeight: 140)
+                .frame(maxHeight: 100)
             }
 
             Divider().background(border)
@@ -89,11 +137,69 @@ struct SidebarView: View {
                             }
                         }
                     }
+                    .frame(maxHeight: viewMode == .corkboard ? 0 : 180)
+                    .opacity(viewMode == .corkboard ? 0 : 1)
+                }
+
+                // Scenes (only when a chapter is selected AND viewMode is not corkboard)
+                if state.currentChapter != nil && viewMode != .corkboard {
+                    Divider().background(border)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("SCENES")
+                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .foregroundColor(textMuted)
+                            Spacer()
+                            Button(action: {
+                                Task { await state.createScene(name: "scene-\(state.scenes.count + 1)") }
+                            }) {
+                                Image(systemName: "plus")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(textMuted)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 2) {
+                                ForEach(state.scenes) { scene in
+                                    sceneButton(scene)
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 100)
+                    }
                 }
                 Spacer()
             }
         }
         .background(bg)
+    }
+
+    private func sceneButton(_ scene: Scene) -> some View {
+        Button(action: {
+            Task { await state.selectScene(scene) }
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "rectangle")
+                    .font(.system(size: 9))
+                    .foregroundColor(state.currentScene?.id == scene.id ? accent : textMuted)
+                    .frame(width: 14)
+                Text(scene.name)
+                    .font(.system(size: 11))
+                    .foregroundColor(state.currentScene?.id == scene.id ? textPrimary : textSecondary)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(state.currentScene?.id == scene.id ? accent.opacity(0.12) : Color.clear)
+            .cornerRadius(4)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 6)
     }
 
     private func projectButton(_ project: Project) -> some View {

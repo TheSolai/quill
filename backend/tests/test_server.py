@@ -259,7 +259,8 @@ class TestExport:
 
     def test_unknown_format_400(self, client):
         proj = client.post("/api/projects", json={"name": "T"}).get_json()
-        r = client.get(f"/api/projects/{proj['id']}/export/epub")
+        r = client.get(f"/api/projects/{proj['id']}/export/rtf")
+        # epub IS supported now
         assert r.status_code == 400
 
 
