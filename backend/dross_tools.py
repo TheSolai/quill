@@ -247,18 +247,23 @@ def tool_claude(args: dict) -> dict:
 
 
 def tool_openclaw(args: dict) -> dict:
-    """Run the OpenClaw CLI for one agent turn. Use for autonomous multi-step
+    """Run the OpenClaw agent CLI for one agent turn. Use for autonomous multi-step
     coding tasks or anything that benefits from OpenClaw's agent framework.
 
     Args:
         prompt: the prompt / task
+        local: run embedded locally (no gateway), default False
         timeout: max seconds (default 180, max 600)
     """
     prompt = args.get("prompt", "").strip()
     if not prompt:
         return {"error": "prompt required"}
+    local = bool(args.get("local", False))
     timeout = min(int(args.get("timeout", 180)), 600)
-    return _run_cli("openclaw", ["agent", prompt], timeout=timeout)
+    args_list = ["agent", "-m", prompt]
+    if local:
+        args_list.append("--local")
+    return _run_cli("openclaw", args_list, timeout=timeout)
 
 
 def tool_clawhub(args: dict) -> dict:
