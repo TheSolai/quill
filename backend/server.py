@@ -35,7 +35,7 @@ def get_project_dir(project_id):
 
 def list_markdown_files(project_id):
     project_dir = get_project_dir(project_id)
-    files = sorted(project_dir.glob("*.md"))
+    files = sorted(project_dir.glob("*.md"), key=lambda p: natural_sort_key(p.stem))
     return [
         {"name": f.stem, "path": str(f), "modified": os.path.getmtime(f), "size": os.path.getsize(f)}
         for f in files
@@ -53,6 +53,12 @@ def get_project_context(project_id):
 def save_project_context(project_id, ctx):
     ctx_file = get_project_dir(project_id) / ".quill_context.json"
     ctx_file.write_text(json.dumps(ctx, indent=2), encoding="utf-8")
+
+
+def natural_sort_key(name: str):
+    """Sort key that handles numbers naturally: chapter-2 before chapter-10."""
+    parts = re.split(r"(\d+)", name)
+    return [int(p) if p.isdigit() else p.lower() for p in parts]
 
 
 def read_chapter(project_id, chapter_name):
@@ -314,10 +320,11 @@ def compile_book(project_id):
     dedication = ctx.get("dedication", "")
     epigraph = ctx.get("epigraph", "")
 
-    chapters = sorted(project_dir.glob("*.md"))
+    chapters = sorted(project_dir.glob("*.md"), key=lambda p: natural_sort_key(p.stem))
     chapters = [c for c in chapters if not c.stem.startswith(".")]
 
     body = []
+    included = []
     for ch in chapters:
         content = ch.read_text(encoding="utf-8")
         # Strip leading whitespace and split into lines
@@ -329,6 +336,7 @@ def compile_book(project_id):
             # Empty chapter (just heading) — skip
             continue
         body.append(content)
+        included.append(ch)
 
     front_matter = f'---\ntitle: "{title}"\nauthor: "{author}"\ndate: "{datetime.now().strftime("%B %Y")}"\n---\n\n'
     if dedication:
@@ -345,16 +353,16 @@ def compile_book(project_id):
         front_matter += f"*Style: {style_notes}*\n\n---\n\n"
 
     compiled = front_matter + "\n\n".join(body)
-    return compiled, title, ctx
+    return compiled, title, ctx, len(included)
 
 
 @app.route("/api/projects/<project_id>/compile", methods=["GET"])
 def get_compile_preview(project_id):
-    compiled, title, ctx = compile_book(project_id)
+    compiled, title, ctx, chapter_count = compile_book(project_id)
     return {
         "title": title,
         "content": compiled,
-        "chapter_count": len([c for c in get_project_dir(project_id).glob("*.md") if not c.stem.startswith(".")]),
+        "chapter_count": chapter_count,
         "word_count": len(compiled.split()),
         "author": ctx.get("author", ""),
         "genre": ctx.get("genre", ""),
@@ -366,7 +374,7 @@ def export_book(project_id, format):
     if format not in ["pdf", "docx", "md", "txt"]:
         return {"error": "Unknown format"}, 400
 
-    compiled, title, _ = compile_book(project_id)
+    compiled, title, _, _ = compile_book(project_id)
     project_dir = get_project_dir(project_id)
     safe_title = re.sub(r'[^\w\- ]', '', title).strip().replace(' ', '-')
 

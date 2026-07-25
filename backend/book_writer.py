@@ -206,22 +206,42 @@ def main():
     )
     (out / f"{pid}_outline.md").write_text(outline_text)
 
-    # Parse outline
+    # Parse outline — handle markdown bold, asterisks, em-dashes, etc.
     chapters = []
     cur = {}
+    import re as _re
+    # CHAPTER [N] [separator] [title]
+    # Separator can be: :, ., —, -, or just space
+    # Title can be wrapped in **, *, or plain
+    chapter_re = _re.compile(
+        r"^\*?\*?CHAPTER\s+(\d+)\*?\*?(?:[:\.\s\-—]+\*?\*?(.*?)\*?\*?)?\s*$",
+        _re.IGNORECASE
+    )
+    summary_re = _re.compile(
+        r"^\*?\*?SUMMARY\*?\*?[:\.\s]+(.+)$",
+        _re.IGNORECASE
+    )
+
     for line in outline_text.split("\n"):
         line = line.strip()
-        if line.upper().startswith("CHAPTER"):
+        m = chapter_re.match(line)
+        if m:
             if cur:
                 chapters.append(cur)
-            parts = line.split(":", 1)
-            num_str = parts[0].upper().replace("CHAPTER", "").strip()
-            num = int(num_str) if num_str.isdigit() else len(chapters) + 1
-            cur = {"num": num, "title": parts[1].strip() if len(parts) > 1 else f"Chapter {num}"}
-        elif line.upper().startswith("SUMMARY") and cur:
-            cur["summary"] = line.split(":", 1)[1].strip() if ":" in line else ""
-        elif cur.get("summary") is not None and line and not line.upper().startswith("CHAPTER"):
-            cur["summary"] = cur.get("summary", "") + " " + line
+            num = int(m.group(1))
+            title_raw = (m.group(2) or "").strip()
+            # Strip any leading separator that got captured
+            title_raw = _re.sub(r"^[:\.\s\-—\*]+", "", title_raw)
+            title = title_raw.strip() if title_raw else f"Chapter {num}"
+            cur = {"num": num, "title": title}
+            continue
+        m = summary_re.match(line)
+        if m and cur:
+            cur["summary"] = m.group(1).strip()
+            continue
+        # Continuation of summary
+        if cur and cur.get("summary") and line and not chapter_re.match(line):
+            cur["summary"] = cur["summary"] + " " + line
     if cur:
         chapters.append(cur)
 
