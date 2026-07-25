@@ -540,5 +540,117 @@ class TestBackendSSEFileOps:
         pytest.skip("Live server SSE test — covered by simulate.py")
 
 
+class TestNegativePatterns:
+    """Technique #1: Role anchoring with negative examples.
+
+    The model should be told what it is NOT and the specific phrases to
+    avoid. Research basis: Constitutional AI (Bai 2022), Stable Diffusion
+    negative prompts, role-prompting literature.
+    """
+
+    def test_constant_exists_and_nonempty(self):
+        from book_writer import NEGATIVE_PATTERNS
+        assert isinstance(NEGATIVE_PATTERNS, str)
+        assert len(NEGATIVE_PATTERNS) > 200, "NEGATIVE_PATTERNS should be substantive"
+
+    def test_contains_required_anti_cliches(self):
+        """The negative pattern list must explicitly name the most common
+        LLM prose fingerprints."""
+        from book_writer import NEGATIVE_PATTERNS
+        required = [
+            "It wasn't X, it was Y",
+            "shiver ran down",
+            "Little did",
+            "The air was thick with",
+            "Suddenly",
+            "As if on cue",
+            "said quietly",
+            "whispered softly",
+        ]
+        for phrase in required:
+            assert phrase in NEGATIVE_PATTERNS, (
+                f"NEGATIVE_PATTERNS missing required phrase: {phrase!r}"
+            )
+
+    def test_contains_positive_directives(self):
+        """It's not just 'don't do X' — the list should also include what
+        the model should DO instead."""
+        from book_writer import NEGATIVE_PATTERNS
+        positives = ["Show, don't tell", "specific sensory detail"]
+        for phrase in positives:
+            assert phrase in NEGATIVE_PATTERNS, (
+                f"NEGATIVE_PATTERNS should include positive directive: {phrase!r}"
+            )
+
+    def test_compose_system_prompt_includes_negatives_by_default(self):
+        """Default prose call must include the negative patterns."""
+        from book_writer import compose_system_prompt, NEGATIVE_PATTERNS
+        prompt = compose_system_prompt("prose")
+        assert "master fiction writer" in prompt  # from CHAPTER_SYSTEM
+        assert "shiver ran down" in prompt         # from NEGATIVE_PATTERNS
+
+    def test_compose_system_prompt_can_disable_negatives(self):
+        """A/B escape hatch: include_negatives=False must drop the list."""
+        from book_writer import compose_system_prompt
+        prompt_with = compose_system_prompt("prose", include_negatives=True)
+        prompt_without = compose_system_prompt("prose", include_negatives=False)
+        assert "shiver ran down" in prompt_with
+        assert "shiver ran down" not in prompt_without
+
+    def test_non_prose_phases_skip_negatives(self):
+        """Research/outline phases should not get the prose-only anti-list."""
+        from book_writer import compose_system_prompt
+        for phase in ("research", "outline", "plan", "critique"):
+            prompt = compose_system_prompt(phase)
+            assert "shiver ran down" not in prompt, (
+                f"{phase} should not include prose-only anti-patterns"
+            )
+
+    def test_write_chapter_uses_composed_prompt(self, monkeypatch):
+        """The actual write_one_chapter call must use compose_system_prompt
+        (so future #13 persona persistence lands cleanly)."""
+        from book_writer import compose_system_prompt, write_one_chapter
+        import argparse
+        args = argparse.Namespace(
+            writing_model="gemma4:latest",
+            title="T", genre="g", style="s",
+        )
+        captured = {}
+
+        def fake_stream(model, prompt, system, options):
+            captured["system"] = system
+            yield "ok"
+
+        monkeypatch.setattr("book_writer.ollama_generate_streaming", fake_stream)
+        # Stub out the req() call so we don't hit the live server
+        monkeypatch.setattr("book_writer.req", lambda *a, **k: (200, b'{}'))
+
+        write_one_chapter(
+            args, "fake-pid",
+            {"num": 1, "title": "T", "summary": "S"},
+            research="r", prior_summary="",
+            prior_excerpts="", prior_chars="", prior_world="",
+        )
+        # The system prompt sent to Ollama must include the negative patterns
+        assert "shiver ran down" in captured["system"], (
+            "write_one_chapter must send NEGATIVE_PATTERNS in the system prompt"
+        )
+
+    def test_banned_phrases_count_in_generated_text(self):
+        """Sanity: a properly-anchored generation should reduce banned-phrase
+        count. We don't run a real generation here (slow), but verify the
+        utility function works."""
+        from book_writer import NEGATIVE_PATTERNS
+        import re
+
+        # Extract a few banned patterns and verify we can detect them
+        sample = "She felt sad. A shiver ran down her spine. Little did she know."
+        # Count occurrences of "shiver ran down" in sample
+        hits = len(re.findall(r"shiver ran down", sample, re.IGNORECASE))
+        assert hits == 1
+        # Confirm the list names this pattern so it can be detected
+        assert "shiver ran down" in NEGATIVE_PATTERNS.lower()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

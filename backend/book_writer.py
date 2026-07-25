@@ -126,6 +126,55 @@ End with a hook. No headers or preambles. Output ONLY the chapter prose.
 
 Begin:"""
 
+# Negative-pattern list (Technique #1: Role anchoring with negative examples).
+# Research basis: Constitutional AI (Bai 2022), Stable Diffusion negative prompts,
+# role-prompting literature. Naming what the model is NOT — and the specific
+# phrases to avoid — is a stronger constraint than abstract style guidance.
+# Kept separate from CHAPTER_SYSTEM so we can A/B and disable via
+# compose_system_prompt(phase="prose", include_negatives=False).
+NEGATIVE_PATTERNS = """\
+You are NOT: a marketing copywriter, an RPG dungeon master, a screenwriter,
+a romance novelist, or a generic LLM writing filler prose.
+
+You do NOT use these phrases:
+- "It wasn't X, it was Y"
+- "A shiver ran down her/his spine"
+- "Little did [name] know"
+- "The air was thick with"
+- "In a world where..."
+- "Suddenly, [event]"
+- "As if on cue"
+- Triple adjectives ("dark, cold, foreboding")
+- Adverbs in dialogue tags ("said quietly", "whispered softly")
+- Generic emotion names ("she felt sad", "anger rose within him")
+- "It was then that [character] realized..."
+
+You DO:
+- Show, don't tell (replace "she was angry" with a clenched jaw)
+- Mix short and long sentences for rhythm
+- Use specific sensory detail (the mineral smell of cold water, not "the cold water")
+- Trust the reader to understand subtext"""
+
+
+def compose_system_prompt(phase: str = "prose", include_negatives: bool = True) -> str:
+    """Compose the system prompt for a given phase.
+
+    Currently: appends NEGATIVE_PATTERNS to CHAPTER_SYSTEM for prose phase.
+    Forward-compatible: when persona persistence (#13) lands, this will also
+    prepend a QUILL_PERSONA constant.
+
+    Args:
+        phase: "prose" (default) | "research" | "outline" | "plan" | "critique"
+        include_negatives: when False, omits NEGATIVE_PATTERNS (A/B testing)
+
+    Returns:
+        The composed system prompt string.
+    """
+    base = CHAPTER_SYSTEM
+    if phase == "prose" and include_negatives:
+        return f"{base}\n\n{NEGATIVE_PATTERNS}"
+    return base
+
 
 def write_one_chapter(args, project_id, c, research, prior_summary, prior_excerpts, prior_chars, prior_world):
     chapter_name = f"chapter-{c['num']:02d}"
@@ -142,7 +191,7 @@ def write_one_chapter(args, project_id, c, research, prior_summary, prior_excerp
     tokens = []
     t0 = time.time()
     for token in ollama_generate_streaming(
-        args.writing_model, prompt, system=CHAPTER_SYSTEM,
+        args.writing_model, prompt, system=compose_system_prompt("prose"),
         options={"temperature": 0.9, "top_p": 0.92, "num_ctx": 8192}
     ):
         tokens.append(token)
