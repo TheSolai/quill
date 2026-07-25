@@ -503,19 +503,25 @@ class AppState: ObservableObject {
 
     func loadAllSynopses() async {
         guard let project = currentProject else { return }
+        // Snapshot the chapters list so concurrent mutations don't break iteration
+        let chaptersSnapshot = chapters
+        print("[Quill] loadAllSynopses: starting for \(chaptersSnapshot.count) chapters in project \(project.id)")
         var loaded: [String: String] = [:]
-        for chapter in chapters {
+        for chapter in chaptersSnapshot {
             do {
                 let s: Synopsis = try await BackendService.shared.get(
                     "/api/projects/\(project.id)/chapters/\(chapter.name)/synopsis"
                 )
+                print("[Quill] loadAllSynopses: got synopsis for \(chapter.name): \(s.synopsis.prefix(30))")
                 if !s.synopsis.isEmpty {
                     loaded[chapter.name] = s.synopsis
                 }
             } catch {
+                print("[Quill] loadAllSynopses: error for \(chapter.name): \(error)")
                 // ignore
             }
         }
+        print("[Quill] loadAllSynopses: done, loaded \(loaded.count) synopses")
         synopses = loaded
     }
 

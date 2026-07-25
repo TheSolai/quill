@@ -23,7 +23,9 @@ struct ExportView: View {
     @State private var activeTab: ExportTab = .preview
 
     enum ExportFormat: String, CaseIterable, Identifiable {
-        case pdf = "PDF", docx = "DOCX", md = "Markdown", txt = "Plain Text", html = "HTML", epub = "ePub"
+        case pdf = "PDF", docx = "DOCX", vellum = "Vellum DOCX",
+             md = "Markdown", txt = "Plain Text", html = "HTML", epub = "ePub",
+             rtf = "RTF", opml = "OPML", bundle = "ZIP Bundle"
 
         var id: String { rawValue }
 
@@ -31,21 +33,45 @@ struct ExportView: View {
             switch self {
             case .pdf: return "doc.fill"
             case .docx: return "doc.richtext.fill"
+            case .vellum: return "book.pages.fill"
             case .md: return "doc.plaintext.fill"
             case .txt: return "doc.text.fill"
             case .html: return "globe"
             case .epub: return "book.closed.fill"
+            case .rtf: return "doc.richtext"
+            case .opml: return "list.bullet.indent"
+            case .bundle: return "doc.zipper"
             }
         }
 
         var description: String {
             switch self {
             case .pdf: return "Print-ready PDF with formatting"
-            case .docx: return "Microsoft Word document"
+            case .docx: return "Microsoft Word document (standard)"
+            case .vellum: return "Vellum-compatible — auto-detects chapters & scene breaks"
             case .md: return "Raw markdown, all chapters merged"
             case .txt: return "Plain text, no formatting"
             case .html: return "Standalone web page, styled for reading"
             case .epub: return "E-book format for Kindle, iBooks, etc."
+            case .rtf: return "Rich Text Format (universal)"
+            case .opml: return "Outline editor format (chapters + scenes)"
+            case .bundle: return "ZIP with all chapters + manifest.json"
+            }
+        }
+
+        /// Path on the backend
+        var apiPath: String {
+            switch self {
+            case .pdf: return "export/pdf"
+            case .docx: return "export/docx"
+            case .vellum: return "export/vellum"
+            case .md: return "export/md"
+            case .txt: return "export/txt"
+            case .html: return "export/html"
+            case .epub: return "export/epub"
+            case .rtf: return "export/rtf"
+            case .opml: return "export/opml"
+            case .bundle: return "export/bundle"
             }
         }
     }
@@ -366,11 +392,25 @@ struct ExportView: View {
         Task {
             do {
                 let data: Data = try await BackendService.shared.getRaw(
-                    "/api/projects/\(project.id)/export/\(exportFormat.rawValue.lowercased())"
+                    "/api/projects/\(project.id)/\(exportFormat.apiPath)"
                 )
                 let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
                 let safeName = (compilePreview?.title ?? project.name).replacingOccurrences(of: " ", with: "-")
-                let ext = exportFormat.rawValue.lowercased()
+                // Map formats to file extensions
+                let ext: String = {
+                    switch exportFormat {
+                    case .pdf: return "pdf"
+                    case .docx: return "docx"
+                    case .vellum: return "docx"
+                    case .md: return "md"
+                    case .txt: return "txt"
+                    case .html: return "html"
+                    case .epub: return "epub"
+                    case .rtf: return "rtf"
+                    case .opml: return "opml"
+                    case .bundle: return "zip"
+                    }
+                }()
                 let fileURL = downloadsURL.appendingPathComponent("\(safeName).\(ext)")
                 try data.write(to: fileURL)
                 exportedURL = fileURL

@@ -13,7 +13,7 @@ struct SidebarView: View {
     @Binding var showNewChapter: Bool
     @Binding var newChapterName: String
     let width: CGFloat
-    let viewMode: ViewMode
+    @Binding var viewMode: ViewMode
     @Binding var showStoryBible: Bool
 
     enum ViewMode: String, CaseIterable, Identifiable {
@@ -59,12 +59,13 @@ struct SidebarView: View {
             HStack(spacing: 4) {
                 ForEach(ViewMode.allCases) { mode in
                     Button(action: {
+                        // Story Bible is a sheet, not a main view mode
                         if mode == .storyBible {
                             showStoryBible = true
                         } else {
                             showStoryBible = false
+                            viewMode = mode
                         }
-                        // Use the binding pattern
                     }) {
                         HStack(spacing: 4) {
                             Image(systemName: mode.icon)
@@ -74,8 +75,8 @@ struct SidebarView: View {
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 5)
-                        .background(viewMode == mode ? accent.opacity(0.2) : Color.clear)
-                        .foregroundColor(viewMode == mode ? accent : textMuted)
+                        .background(viewMode == mode && mode != .storyBible ? accent.opacity(0.2) : Color.clear)
+                        .foregroundColor(viewMode == mode && mode != .storyBible ? accent : textMuted)
                         .cornerRadius(4)
                     }
                     .buttonStyle(.plain)

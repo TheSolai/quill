@@ -37,7 +37,7 @@ struct MainView: View {
                     showNewChapter: $showNewChapter,
                     newChapterName: $newChapterName,
                     width: sidebarWidth,
-                    viewMode: viewMode,
+                    viewMode: $viewMode,
                     showStoryBible: $showStoryBible
                 )
                 .frame(width: sidebarWidth)

@@ -14,6 +14,7 @@ struct EditorView: View {
     @State private var showPreview: Bool = false
     @State private var previewMode: PreviewMode = .split
     @FocusState private var editorFocused: Bool
+    @ObservedObject private var slotRegistry = LLMSlotRegistry.shared
 
     enum PreviewMode: String, CaseIterable, Identifiable {
         case edit = "Edit"
@@ -83,6 +84,7 @@ struct EditorView: View {
 
             if state.currentChapter != nil {
                 editorArea
+                    .id("editor-\(state.currentChapter?.id ?? "unknown")")
             } else {
                 emptyState
             }
@@ -112,7 +114,11 @@ struct EditorView: View {
     }
 
     private var markdownEditor: some View {
+        // Force a new TextEditor instance whenever the chapter changes.
+        // SwiftUI's TextEditor doesn't reliably re-render when the binding's
+        // source value changes externally, so we use .id() to remount it.
         TextEditor(text: currentTextBinding)
+            .id(state.currentChapter?.id ?? "empty")
             .font(.system(size: 14, design: .monospaced))
             .foregroundColor(textPrimary)
             .scrollContentBackground(.hidden)
@@ -127,6 +133,10 @@ struct EditorView: View {
             }
             .onChange(of: state.currentChapter?.id) { _, _ in
                 editorFocused = true
+                print("[Quill] EditorView: chapter changed to \(state.currentChapter?.id ?? "nil"), activeContent length=\(activeContent.count)")
+            }
+            .onAppear {
+                print("[Quill] EditorView: appeared, currentChapter=\(state.currentChapter?.id ?? "nil"), activeContent length=\(activeContent.count)")
             }
     }
 
@@ -211,6 +221,19 @@ struct EditorView: View {
             }
 
             Spacer()
+
+            // Server indicator — click to change (Dross's "Change server" button)
+            ServerButton(
+                activeSlotId: slotRegistry.activeSlotId,
+                activeSlotName: slotRegistry.activeSlot?.name ?? "—",
+                accent: accent,
+                textPrimary: textPrimary,
+                textMuted: textMuted,
+                border: border,
+                onSelect: { slotId in
+                    Task { await slotRegistry.setActive(slotId) }
+                }
+            )
 
             if state.statusMessage == "Saved" || state.statusMessage == "Scene saved" || state.statusMessage == "Story Bible saved" {
                 HStack(spacing: 4) {
@@ -631,5 +654,136 @@ struct MarkdownBlockView: View {
             ForEach(0..<rendered.count, id: \.self) { idx in rendered[idx] }
             Spacer()
         })
+    }
+}
+
+// MARK: - ServerButton
+// A compact dropdown showing the active AI server (slot). Click to switch.
+// This is Dross's "Change server" button — the visible UI for slot management.
+
+struct ServerButton: View {
+    let activeSlotId: String
+    let activeSlotName: String
+    let accent: Color
+    let textPrimary: Color
+    let textMuted: Color
+    let border: Color
+    let onSelect: (String) -> Void
+
+    @State private var isHovered: Bool = false
+    @State private var showMenu: Bool = false
+
+    var body: some View {
+        Button(action: { showMenu.toggle() }) {
+            HStack(spacing: 5) {
+                Image(systemName: iconForType(slotTypeForId(activeSlotId)))
+                    .font(.system(size: 9))
+                    .foregroundColor(accent)
+                Text(displayName)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(isHovered ? textPrimary : textMuted)
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8))
+                    .foregroundColor(textMuted)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(isHovered ? accent.opacity(0.1) : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(isHovered ? accent.opacity(0.4) : border, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help("Click to change AI server")
+        .popover(isPresented: $showMenu, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Image(systemName: "cpu").foregroundColor(accent)
+                    Text("AI Server").font(.system(size: 11, weight: .bold))
+                    Spacer()
+                }
+                .padding(8)
+                .background(accent.opacity(0.1))
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(LLMSlotRegistry.shared.slots) { slot in
+                            Button(action: {
+                                onSelect(slot.id)
+                                showMenu = false
+                            }) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: iconForType(slot.type))
+                                        .font(.system(size: 10))
+                                        .foregroundColor(slot.id == activeSlotId ? accent : textMuted)
+                                        .frame(width: 14)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        HStack(spacing: 4) {
+                                            Text(slot.name)
+                                                .font(.system(size: 11, weight: .medium))
+                                                .foregroundColor(slot.id == activeSlotId ? textPrimary : Color.secondary)
+                                                .lineLimit(1)
+                                            if slot.isDefault {
+                                                Text("DEFAULT")
+                                                    .font(.system(size: 7, weight: .bold, design: .monospaced))
+                                                    .padding(.horizontal, 3)
+                                                    .padding(.vertical, 1)
+                                                    .background(accent.opacity(0.2))
+                                                    .foregroundColor(accent)
+                                                    .cornerRadius(2)
+                                            }
+                                        }
+                                        Text("\(slot.type) · \(slot.modelId)")
+                                            .font(.system(size: 8, design: .monospaced))
+                                            .foregroundColor(textMuted)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    if slot.id == activeSlotId {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(accent)
+                                    }
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(slot.id == activeSlotId ? accent.opacity(0.1) : Color.clear)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .frame(maxHeight: 280)
+            }
+            .frame(width: 320)
+        }
+    }
+
+    private var displayName: String {
+        if activeSlotName.count > 30 {
+            return String(activeSlotName.prefix(27)) + "..."
+        }
+        return activeSlotName
+    }
+
+    private func slotTypeForId(_ id: String) -> String {
+        LLMSlotRegistry.shared.slots.first { $0.id == id }?.type ?? "ollama"
+    }
+
+    private func iconForType(_ type: String) -> String {
+        switch type {
+        case "ollama": return "server.rack"
+        case "mlx": return "cpu"
+        case "minimax": return "cloud"
+        case "lmstudio": return "desktopcomputer"
+        case "custom": return "wrench.and.screwdriver"
+        default: return "questionmark.circle"
+        }
     }
 }

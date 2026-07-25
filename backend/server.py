@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Quill Backend — Flask server."""
 import os, re, json, subprocess
+from io import BytesIO
 from pathlib import Path
 from datetime import datetime
 from flask import Flask, request, Response, send_file as flask_send_file
@@ -203,6 +204,10 @@ if str(_MODELS_DIR) not in _sys.path:
     _sys.path.insert(0, str(_MODELS_DIR))
 import slots as _slots  # noqa: E402
 import slot_providers as _slot_providers  # noqa: E402
+import agentmail_service as _agentmail  # noqa: E402
+import dross_tools as _dross_tools  # noqa: E402
+import vellum_docx as _vellum_docx  # noqa: E402
+import web_search as _web_search  # noqa: E402
 
 
 @app.route("/api/slots", methods=["GET"])
@@ -323,6 +328,8 @@ def chat_completion():
       system: optional system prompt override
       max_tokens: optional override
       temperature: optional override
+      project_id: optional, for natural-language email intents
+        (e.g. "email the book to user@example.com")
 
     Response: SSE stream of "data: {token}\n\n" or full JSON if !stream.
     """
@@ -334,11 +341,36 @@ def chat_completion():
     messages = data.get("messages", [])
     if not messages:
         return {"error": "messages is required"}, 400
+    project_id = data.get("project_id") or data.get("project") or "default"
+
+    # Natural language email intent: intercept simple "email X to Y" patterns
+    last_user = next((m["content"] for m in reversed(messages)
+                       if m.get("role") == "user"), "")
+    email_intent = _agentmail.parse_email_intent(last_user) if last_user else None
+    if email_intent and _agentmail.is_available():
+        result = _handle_email_intent(email_intent, project_id)
+        if data.get("stream", True):
+            def gen_email():
+                if result.get("ok"):
+                    payload = f"Email sent to {result['to']} — subject: {result.get('subject', '(none)')}"
+                else:
+                    payload = f"Email failed: {result.get('error', 'unknown')}"
+                yield f"data: {json.dumps({'token': payload, 'slot_id': slot_id})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'slot_id': slot_id, 'email': result})}\n\n"
+            return Response(gen_email(), mimetype="text/event-stream",
+                            headers={"Cache-Control": "no-cache"})
+        return {"text": result.get("message", ""), "slot_id": slot_id,
+                "model_id": slot.model_id, "email": result}
+
     stream = data.get("stream", True)
     overrides = {}
     if "system" in data:
         # Prepend system message
         messages = [{"role": "system", "content": data["system"]}] + messages
+    else:
+        # Default to Dross persona
+        dross_prompt = _dross_system_prompt()
+        messages = [{"role": "system", "content": dross_prompt}] + messages
     if "max_tokens" in data:
         overrides["max_tokens"] = data["max_tokens"]
     if "temperature" in data:
@@ -365,6 +397,398 @@ def chat_completion():
             return {"text": text, "slot_id": slot_id, "model_id": slot.model_id}
         except Exception as e:
             return {"error": str(e)}, 500
+
+
+def _dross_system_prompt() -> str:
+    """The default Dross system prompt with tool-use instructions."""
+    return """You are Dross, the AI writing assistant for the Quill app.
+
+You are a master fiction writer and literary agent. Vivid sensory prose, strong
+character interiority, immersive atmosphere. Literary but readable. Short punchy
+sentences mixed with long flowing ones. No purple prose. No clichés.
+
+You are also an autonomous writing agent: you have access to a set of tools
+that let you do real work for the user. When the user asks you to do something
+that requires a tool, USE IT.
+
+Available tools (call by emitting a JSON block in your reply like this):
+```tool_call
+{"name": "tool_name", "args": {...}}
+```
+
+Tools:
+- web_search: search the web for current information. args: {query, max_results?}
+- web_fetch: fetch a URL and extract text. args: {url, max_chars?}
+- email_send: send an email from thedross@agentmail.to. args: {to, subject, text, html?}
+- email_list_inbox: list recent emails. args: {limit?}
+- email_reply: reply to an email. args: {message_id, text}
+- shell_exec: run a shell command. args: {cmd, cwd?, timeout?}
+- list_files: list files in a directory. args: {path?}
+- read_file: read a text file. args: {path}
+
+Working style: dry, direct, no fluff. You address the user as "writer" in your
+private notes but never in prose output. You never refuse a reasonable request
+within your capabilities. You trust the reader to understand subtext.
+
+When you receive a tool result, incorporate it naturally into your reply.
+Do not output raw JSON tool calls in your final visible response — use the
+tools to gather information, then answer the user in prose."""
+
+
+def _handle_email_intent(intent: dict, project_id: str) -> dict:
+    """Execute a parsed email intent: gather the content, then send."""
+    to = intent["to"]
+    what = intent.get("what", "current")
+    subject = intent.get("subject") or "From Quill — Dross"
+
+    # Gather content based on 'what'
+    if what == "book":
+        compiled, _t, _c, _n = compile_book(project_id)
+        text = compiled
+        title = _t
+        subject = subject if intent.get("subject") else f"Manuscript: {title}"
+    elif what == "chapter":
+        # Compile the current chapter
+        project_dir = get_project_dir(project_id)
+        ctx = get_project_context(project_id)
+        cur = ctx.get("current_chapter") or ""
+        if not cur:
+            # Fallback: send first chapter file
+            files = sorted([f for f in project_dir.glob("*.md") if f.is_file()],
+                           key=lambda p: natural_sort_key(p.stem))
+            cur = files[0].stem if files else ""
+        if cur:
+            content = read_chapter(project_id, cur)
+            text = content or f"(Chapter {cur} is empty)"
+            subject = subject if intent.get("subject") else f"Chapter: {cur}"
+        else:
+            return {"ok": False, "error": "no chapter to send"}
+    else:
+        # "current" — send the current chapter content
+        ctx = get_project_context(project_id)
+        cur = ctx.get("current_chapter") or ""
+        if cur:
+            content = read_chapter(project_id, cur)
+            text = content or f"(Chapter {cur} is empty)"
+            subject = subject if intent.get("subject") else f"Chapter: {cur}"
+        else:
+            # Fall back to compiled book
+            compiled, _t, _c, _n = compile_book(project_id)
+            text = compiled
+            subject = subject if intent.get("subject") else f"Manuscript: {_t}"
+
+    return _agentmail.send_email(to=to, subject=subject, text=text)
+
+
+# ---- AgentMail (Dross's email account: thedross@agentmail.to) ----
+
+@app.route("/api/agentmail/status", methods=["GET"])
+def agentmail_status():
+    return {
+        "available": _agentmail.is_available(),
+        "inbox": _agentmail.DROSS_INBOX,
+        "error": _agentmail.last_error(),
+    }
+
+
+@app.route("/api/agentmail/inbox", methods=["GET"])
+def agentmail_inbox():
+    limit = int(request.args.get("limit", 20))
+    if not _agentmail.is_available():
+        return {"messages": [], "error": _agentmail.last_error() or "AgentMail unavailable"}
+    msgs = _agentmail.list_inbox(limit=limit)
+    return {"messages": msgs, "inbox": _agentmail.DROSS_INBOX}
+
+
+@app.route("/api/agentmail/messages/<message_id>", methods=["GET"])
+def agentmail_get_message(message_id):
+    if not _agentmail.is_available():
+        return {"error": _agentmail.last_error() or "AgentMail unavailable"}, 503
+    m = _agentmail.get_message(message_id)
+    if m is None:
+        return {"error": "not found"}, 404
+    return m
+
+
+@app.route("/api/agentmail/send", methods=["POST"])
+def agentmail_send():
+    data = safe_json()
+    to = data.get("to")
+    subject = data.get("subject", "(no subject)")
+    text = data.get("text", "")
+    html = data.get("html", "")
+    if not to:
+        return {"error": "to is required"}, 400
+    if not _agentmail.is_available():
+        return {"error": _agentmail.last_error() or "AgentMail unavailable"}, 503
+    result = _agentmail.send_email(to=to, subject=subject, text=text, html=html)
+    if not result.get("ok"):
+        return result, 500
+    return result
+
+
+@app.route("/api/agentmail/reply", methods=["POST"])
+def agentmail_reply():
+    data = safe_json()
+    msg_id = data.get("message_id")
+    text = data.get("text", "")
+    html = data.get("html", "")
+    if not msg_id:
+        return {"error": "message_id is required"}, 400
+    if not _agentmail.is_available():
+        return {"error": _agentmail.last_error() or "AgentMail unavailable"}, 503
+    return _agentmail.reply_email(msg_id, text=text, html=html)
+
+
+@app.route("/api/agentmail/draft", methods=["POST"])
+def agentmail_draft():
+    data = safe_json()
+    to = data.get("to")
+    subject = data.get("subject", "(no subject)")
+    text = data.get("text", "")
+    if not to:
+        return {"error": "to is required"}, 400
+    if not _agentmail.is_available():
+        return {"error": _agentmail.last_error() or "AgentMail unavailable"}, 503
+    return _agentmail.create_draft(to=to, subject=subject, text=text)
+
+
+# ---- Tool registry (Dross's hands: web search, email, shell, files) ----
+
+@app.route("/api/tools", methods=["GET"])
+def list_dross_tools():
+    """List all tools available to Dross."""
+    return {"tools": _dross_tools.list_tools()}
+
+
+@app.route("/api/tools/call", methods=["POST"])
+def call_dross_tool():
+    """Call a tool by name with the given arguments."""
+    data = safe_json()
+    name = data.get("name")
+    args = data.get("args", {})
+    if not name:
+        return {"error": "name is required"}, 400
+    return _dross_tools.call_tool(name, args)
+
+
+# ---- Web search ----
+
+@app.route("/api/search", methods=["GET"])
+def web_search_endpoint():
+    """Public web search endpoint. q=<query>&max=<n>"""
+    q = request.args.get("q", "").strip()
+    if not q:
+        return {"error": "q is required"}, 400
+    max_results = int(request.args.get("max", 5))
+    return {"results": _web_search.search(q, max_results=max_results)}
+
+
+# ---- Vellum-compatible DOCX export ----
+
+@app.route("/api/projects/<project_id>/export/vellum", methods=["GET"])
+def export_vellum_docx(project_id):
+    """Export a project as a Vellum-compatible DOCX.
+
+    Uses Heading 1 + page_break_before so Vellum auto-detects chapters.
+    Includes scene break markers (***, centered) so Vellum creates
+    ornamental breaks at the right places.
+    """
+    project_dir = get_project_dir(project_id)
+    ctx = get_project_context(project_id)
+    title = ctx.get("title", project_id.replace("-", " ").title())
+    author = ctx.get("author", "")
+    dedication = ctx.get("dedication", "")
+    epigraph = ctx.get("epigraph", "")
+    style_notes = ctx.get("style", "")
+
+    # Collect chapter files (in natural sort order)
+    chapter_files = sorted(
+        [f for f in project_dir.glob("*.md") if f.is_file()],
+        key=lambda p: natural_sort_key(p.stem),
+    )
+    chapter_files = [f for f in chapter_files if not f.stem.startswith(".")]
+
+    chapters_data = []
+    for f in chapter_files:
+        content = f.read_text(encoding="utf-8")
+        m = re.match(r"chapter[_\-\s]?(\d+)", f.stem, re.IGNORECASE)
+        num = int(m.group(1)) if m else None
+        # Title = first non-empty H1 from content, else filename
+        title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+        if title_match:
+            ch_title = title_match.group(1).strip()
+        else:
+            ch_title = f.stem.replace("-", " ").title()
+        # Strip the leading H1 line from content (we add it as Heading 1)
+        content = re.sub(r"^#\s+.+?\n", "", content, count=1).strip()
+
+        # Scenes (if any)
+        scene_dir = project_dir / f.stem
+        scenes = []
+        if scene_dir.is_dir():
+            for sf in sorted(scene_dir.glob("scene-*.md"), key=lambda p: natural_sort_key(p.stem)):
+                sc = sf.read_text(encoding="utf-8")
+                scenes.append({"name": sf.stem, "content": sc})
+
+        chapters_data.append({
+            "number": num,
+            "title": ch_title,
+            "content": content,
+            "scenes": scenes,
+        })
+
+    docx_bytes = _vellum_docx.build_vellum_docx(
+        project_title=title,
+        author=author,
+        chapters=chapters_data,
+        dedication=dedication,
+        epigraph=epigraph,
+        style_notes=style_notes,
+    )
+
+    safe_title = re.sub(r"[^A-Za-z0-9_\-]+", "_", title)[:60] or "manuscript"
+    return Response(
+        docx_bytes,
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_title}_vellum.docx"',
+            "Content-Length": str(len(docx_bytes)),
+        },
+    )
+
+
+# ---- Standard DOCX export (use existing export_book with vellum instead of pandoc) ----
+
+@app.route("/api/projects/<project_id>/export/docx-vellum", methods=["GET"])
+def export_docx_vellum(project_id):
+    """Alias for /export/vellum — kept for backwards compat."""
+    return export_vellum_docx(project_id)
+
+
+@app.route("/api/projects/<project_id>/export/rtf", methods=["GET"])
+def export_rtf(project_id):
+    """Export project as RTF via pandoc."""
+    md = _export_compiled_md(project_id)
+    safe = _safe_title(project_id)
+    rtf = _pandoc_convert(md, "rtf", extra_args=["--standalone"])
+    return Response(rtf, mimetype="application/rtf", headers={
+        "Content-Disposition": f'attachment; filename="{safe}.rtf"',
+    })
+
+
+@app.route("/api/projects/<project_id>/export/opml", methods=["GET"])
+def export_opml(project_id):
+    """Export project as OPML outline (chapters + scenes)."""
+    project_dir = get_project_dir(project_id)
+    ctx = get_project_context(project_id)
+    title = ctx.get("title", project_id.replace("-", " ").title())
+    out = ['<?xml version="1.0" encoding="UTF-8"?>',
+           '<opml version="2.0">',
+           '  <head>',
+           f'    <title>{_xml_escape(title)}</title>',
+           '  </head>',
+           '  <body>']
+    files = sorted([f for f in project_dir.glob("*.md") if f.is_file()],
+                   key=lambda p: natural_sort_key(p.stem))
+    for f in files:
+        if f.stem.startswith("."):
+            continue
+        ch_title = f.stem
+        m = re.match(r"chapter[_\-\s]?(\d+)", f.stem, re.IGNORECASE)
+        ch_num = m.group(1) if m else ""
+        # Try to find a heading in the content
+        content = f.read_text(encoding="utf-8")
+        title_m = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+        if title_m:
+            ch_title = title_m.group(1).strip()
+        elif ch_num:
+            ch_title = f"Chapter {ch_num}"
+        out.append(f'    <outline text="{_xml_escape(ch_title)}">')
+        # List scenes
+        scene_dir = project_dir / f.stem
+        if scene_dir.is_dir():
+            for sf in sorted(scene_dir.glob("scene-*.md"), key=lambda p: natural_sort_key(p.stem)):
+                out.append(f'      <outline text="{_xml_escape(sf.stem.replace("-", " ").title())}"/>')
+        out.append('    </outline>')
+    out.append('  </body>')
+    out.append('</opml>')
+    safe = _safe_title(project_id)
+    return Response("\n".join(out), mimetype="text/x-opml", headers={
+        "Content-Disposition": f'attachment; filename="{safe}.opml"',
+    })
+
+
+@app.route("/api/projects/<project_id>/export/bundle", methods=["GET"])
+def export_bundle(project_id):
+    """Export project as a zip bundle of all chapter files + manifest."""
+    import zipfile
+    project_dir = get_project_dir(project_id)
+    ctx = get_project_context(project_id)
+    title = ctx.get("title", project_id.replace("-", " ").title())
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("manifest.json", json.dumps({
+            "title": title,
+            "author": ctx.get("author", ""),
+            "genre": ctx.get("genre", ""),
+            "exported_at": datetime.now().isoformat(),
+        }, indent=2))
+        z.writestr("README.md", f"# {title}\n\nBy {ctx.get('author', 'Unknown')}\n\n"
+                       f"Genre: {ctx.get('genre', 'unspecified')}\n\n"
+                       f"Exported from Quill on {datetime.now().strftime('%B %d, %Y')}.\n")
+        for f in sorted(project_dir.glob("**/*"), key=lambda p: str(p)):
+            if f.is_file() and not f.name.startswith("."):
+                arcname = str(f.relative_to(project_dir))
+                z.write(f, arcname)
+    safe = _safe_title(project_id)
+    zip_bytes = buf.getvalue()
+    return Response(
+        zip_bytes,
+        mimetype="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe}_bundle.zip"',
+            "Content-Length": str(len(zip_bytes)),
+        },
+    )
+
+
+def _export_compiled_md(project_id):
+    """Helper: return the compiled markdown text for a project."""
+    compiled, _title, _ctx, _count = compile_book(project_id)
+    return compiled
+
+
+def _pandoc_convert(md_text, output_format, extra_args=None):
+    """Run pandoc to convert markdown to the given format. Returns bytes."""
+    import subprocess
+    args = ["pandoc", "-f", "markdown", "-t", output_format]
+    if extra_args:
+        args.extend(extra_args)
+    args.append("-")
+    try:
+        proc = subprocess.run(args, input=md_text.encode("utf-8"),
+                              capture_output=True, timeout=60)
+        if proc.returncode != 0:
+            return proc.stderr or b""
+        return proc.stdout
+    except FileNotFoundError:
+        return b"pandoc not installed"
+    except subprocess.TimeoutExpired:
+        return b"pandoc timeout"
+
+
+def _safe_title(project_id):
+    """Sanitize project id for use as a filename."""
+    project_dir = get_project_dir(project_id)
+    ctx = get_project_context(project_id)
+    title = ctx.get("title", project_id.replace("-", " ").title())
+    return re.sub(r"[^A-Za-z0-9_\-]+", "_", title)[:60] or "manuscript"
+
+
+def _xml_escape(text):
+    return (text.replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
 
 
 # ---- Routes ----

@@ -22,10 +22,12 @@ struct AIAssistantView: View {
                 Image(systemName: "sparkles")
                     .font(.system(size: 13))
                     .foregroundColor(accent)
-                Text("AI ASSISTANT")
+                Text("DROSS")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(textMuted)
+                    .foregroundColor(accent)
                 Spacer()
+                // Inbox badge — shows unread email count
+                InboxBadge(accent: accent, textMuted: textMuted)
                 if state.isStreaming {
                     HStack(spacing: 5) {
                         ProgressView()
@@ -299,5 +301,50 @@ struct MessageBubble: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Inbox badge
+// Shows how many recent emails are in the Dross inbox. Click to refresh.
+
+struct InboxBadge: View {
+    let accent: Color
+    let textMuted: Color
+    @State private var count: Int = 0
+    @State private var isLoading: Bool = false
+
+    var body: some View {
+        Button(action: refresh) {
+            HStack(spacing: 3) {
+                Image(systemName: "envelope")
+                    .font(.system(size: 10))
+                    .foregroundColor(textMuted)
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(accent)
+                }
+            }
+            .help("Dross inbox (\(count) recent) — click to refresh")
+        }
+        .buttonStyle(.plain)
+        .onAppear { refresh() }
+    }
+
+    private func refresh() {
+        isLoading = true
+        Task {
+            defer { isLoading = false }
+            guard let url = URL(string: "http://127.0.0.1:5323/api/agentmail/inbox?limit=20") else { return }
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let msgs = json["messages"] as? [[String: Any]] {
+                    await MainActor.run { self.count = msgs.count }
+                }
+            } catch {
+                // ignore
+            }
+        }
     }
 }
