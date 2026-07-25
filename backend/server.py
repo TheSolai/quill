@@ -1174,12 +1174,15 @@ def get_projects():
     ensure_base_dir()
     projects = []
     for d in sorted(BASE_DIR.iterdir()):
-        if d.is_dir() and not d.name.startswith("."):
-            chapters = list_markdown_files(d.name)
-            projects.append({
-                "id": d.name, "name": d.name.replace("-", " ").replace("_", " ").title(),
-                "path": str(d), "chapter_count": len(chapters),
-            })
+        # Skip hidden dirs (e.g. .DS_Store) and internal pseudo-dirs
+        # (e.g. __context__ from the legacy context endpoint).
+        if not d.is_dir() or d.name.startswith(".") or d.name.startswith("__"):
+            continue
+        chapters = list_markdown_files(d.name)
+        projects.append({
+            "id": d.name, "name": d.name.replace("-", " ").replace("_", " ").title(),
+            "path": str(d), "chapter_count": len(chapters),
+        })
     return projects
 
 
@@ -1962,6 +1965,316 @@ def run_task():
 
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache"})
+
+
+# ---- /api/mcp (HTTP MCP server, JSON-RPC 2.0) -----------------------------
+# Mirrors the stdio MCP server in Helpers/quill-ai-helper.swift.
+# Exposes Quill tools to any MCP-compatible client over HTTP.
+# Endpoint accepts a JSON-RPC 2.0 request:
+#   { "jsonrpc": "2.0", "id": ..., "method": "tools/list" }
+#   { "jsonrpc": "2.0", "id": ..., "method": "tools/call",
+#     "params": { "name": "list_projects", "arguments": {} } }
+#
+# Response is a JSON-RPC 2.0 result/error object.
+
+MCP_TOOLS = [
+    {
+        "name": "list_projects",
+        "description": "List all Quill projects",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_chapters",
+        "description": "List chapters in a project",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"project_id": {"type": "string"}},
+            "required": ["project_id"],
+        },
+    },
+    {
+        "name": "read_chapter",
+        "description": "Read a chapter's full content",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "chapter": {"type": "string"},
+            },
+            "required": ["chapter"],
+        },
+    },
+    {
+        "name": "write_chapter",
+        "description": "Write content to a chapter (creates if missing)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "chapter": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["chapter", "content"],
+        },
+    },
+    {
+        "name": "list_scenes",
+        "description": "List scenes in a chapter",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "chapter": {"type": "string"},
+            },
+            "required": ["chapter"],
+        },
+    },
+    {
+        "name": "read_scene",
+        "description": "Read a scene's content",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "chapter": {"type": "string"},
+                "scene": {"type": "string"},
+            },
+            "required": ["chapter", "scene"],
+        },
+    },
+    {
+        "name": "edit_fix",
+        "description": "Fix typos/grammar in a text snippet via AI",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "instruction": {"type": "string"},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "search_web",
+        "description": "Web search via DuckDuckGo",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "max_results": {"type": "integer"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "shell_exec",
+        "description": "Run a shell command (safety-checked, dangerous patterns blocked)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"cmd": {"type": "string"}},
+            "required": ["cmd"],
+        },
+    },
+    {
+        "name": "list_files",
+        "description": "List files in a directory",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "Read a text file",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "send_email",
+        "description": "Send an email via AgentMail",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string"},
+                "subject": {"type": "string"},
+                "text": {"type": "string"},
+            },
+            "required": ["to", "subject", "text"],
+        },
+    },
+    {
+        "name": "list_inbox",
+        "description": "List recent emails from the Quill inbox",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer"}},
+        },
+    },
+]
+
+
+def _mcp_call_tool(name, args):
+    """Dispatch an MCP tool call to the right backend handler."""
+    import urllib.parse
+    if name == "list_projects":
+        return [p for p in list_projects_iter()]
+    if name == "list_chapters":
+        pid = args.get("project_id", "")
+        if not validate_project_id(pid):
+            return {"error": "invalid project_id"}
+        return list_markdown_files(pid)
+    if name == "read_chapter":
+        pid = args.get("project_id", "")
+        chapter = args.get("chapter", "").replace(".md", "")
+        if not validate_project_id(pid):
+            return {"error": "invalid project_id"}
+        content = read_chapter(pid, chapter)
+        if content is None:
+            return {"error": f"chapter {chapter!r} not found"}
+        return {"name": chapter, "content": content}
+    if name == "write_chapter":
+        pid = args.get("project_id", "")
+        chapter = args.get("chapter", "").replace(".md", "")
+        content = args.get("content", "")
+        if not validate_project_id(pid):
+            return {"error": "invalid project_id"}
+        write_chapter(pid, chapter, content)
+        return {"ok": True, "bytes": len(content)}
+    if name == "list_scenes":
+        pid = args.get("project_id", "")
+        chapter = args.get("chapter", "").replace(".md", "")
+        if not validate_project_id(pid):
+            return {"error": "invalid project_id"}
+        chapter_dir = get_chapter_dir(pid, chapter)
+        if not chapter_dir.exists():
+            return {"error": f"chapter {chapter!r} not found"}
+        scenes = sorted(
+            [f for f in chapter_dir.glob("scene-*.md") if f.is_file()],
+            key=lambda p: natural_sort_key(p.stem),
+        )
+        return [
+            {"name": f.stem, "modified": os.path.getmtime(f), "size": os.path.getsize(f)}
+            for f in scenes
+        ]
+    if name == "read_scene":
+        pid = args.get("project_id", "")
+        chapter = args.get("chapter", "").replace(".md", "")
+        scene = args.get("scene", "").replace(".md", "")
+        if not validate_project_id(pid):
+            return {"error": "invalid project_id"}
+        chapter_dir = get_chapter_dir(pid, chapter)
+        fp = chapter_dir / f"{scene}.md"
+        if not fp.exists():
+            return {"error": f"scene {scene!r} not found"}
+        return {"name": scene, "content": fp.read_text(encoding="utf-8")}
+    if name == "edit_fix":
+        text = args.get("text", "")
+        instruction = args.get("instruction", "fix typos and grammar")
+        if not isinstance(text, str) or not text.strip():
+            return {"error": "text is required"}
+        # Use the existing /api/edit-fix logic (call it via the same route
+        # would create recursion — instead, inline the essentials).
+        # For simplicity, forward to the existing edit_fix logic via Flask
+        # test client is messy; just call the internal function.
+        from flask import request as _req
+        with app.test_request_context(
+            "/api/edit-fix",
+            method="POST",
+            json={"text": text, "instruction": instruction},
+        ):
+            resp = edit_fix()
+            if isinstance(resp, tuple):
+                return resp[0]
+            return resp
+    if name == "search_web":
+        query = args.get("query", "")
+        results = _web_search.search(query, max_results=args.get("max_results", 5))
+        return {"results": results}
+    if name == "shell_exec":
+        return _dross_tools.call_tool("shell_exec", {"cmd": args.get("cmd", "")})
+    if name == "list_files":
+        return _dross_tools.call_tool("list_files", {"path": args.get("path", ".")})
+    if name == "read_file":
+        return _dross_tools.call_tool("read_file", {"path": args.get("path", "")})
+    if name == "send_email":
+        if not _agentmail.is_available():
+            return {"error": "AgentMail not available"}
+        return _agentmail.send_email(
+            to=args.get("to", ""),
+            subject=args.get("subject", ""),
+            text=args.get("text", ""),
+        )
+    if name == "list_inbox":
+        if not _agentmail.is_available():
+            return {"error": "AgentMail not available"}
+        return _agentmail.list_inbox(limit=args.get("limit", 20))
+    return {"error": f"unknown tool: {name}"}
+
+
+def list_projects_iter():
+    """Iterate over project dirs and yield project dicts."""
+    ensure_base_dir()
+    for d in sorted(BASE_DIR.iterdir()):
+        if not d.is_dir() or d.name.startswith(".") or d.name.startswith("__"):
+            continue
+        md_files = list(d.glob("*.md"))
+        yield {
+            "id": d.name,
+            "name": d.name.replace("-", " ").replace("_", " ").title(),
+            "path": str(d),
+            "chapter_count": len(md_files),
+        }
+
+
+@app.route("/api/mcp", methods=["POST"])
+def mcp_endpoint():
+    """JSON-RPC 2.0 MCP endpoint."""
+    data = safe_json()
+    if data.get("jsonrpc") != "2.0":
+        return {"jsonrpc": "2.0", "id": data.get("id"), "error": {"code": -32600, "message": "invalid request"}}, 400
+    method = data.get("method")
+    req_id = data.get("id")
+    params = data.get("params") or {}
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "quill", "version": "1.0.0"},
+                "capabilities": {"tools": {}},
+            },
+        }
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": MCP_TOOLS}}
+    if method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments", {}) or {}
+        if not name:
+            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": "missing tool name"}}, 400
+        try:
+            result = _mcp_call_tool(name, args)
+        except Exception as e:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32603, "message": f"tool error: {e}"},
+            }, 500
+        # Wrap result as MCP content
+        text = result if isinstance(result, str) else json.dumps(result, indent=2)
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {"content": [{"type": "text", "text": text}], "isError": False},
+        }
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": -32601, "message": f"method not found: {method}"},
+    }, 404
 
 
 if __name__ == "__main__":

@@ -10,7 +10,9 @@ struct AIAssistantView: View {
     let textSecondary: Color
     let textMuted: Color
     let border: Color
-    let width: CGFloat
+    // When set (non-zero), the view pins to that width (used in side panel).
+    // When 0 or negative, the view fills the available space (used in tabs).
+    var width: CGFloat = 0
 
     @State private var inputText: String = ""
     @State private var generationMode: AppState.GenerationMode = .long

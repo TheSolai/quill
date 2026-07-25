@@ -1,11 +1,12 @@
 import SwiftUI
+import AppKit
 
 struct MainView: View {
     @StateObject private var state = AppState()
     @EnvironmentObject var commands: AppCommandsState
+    @ObservedObject private var panel = PanelState.shared
 
     @State private var sidebarWidth: CGFloat = 240
-    @State private var aiWidth: CGFloat = 360
     @State private var newProjectName = ""
     @State private var showNewChapter = false
     @State private var newChapterName = ""
@@ -42,69 +43,77 @@ struct MainView: View {
                 )
                 .frame(width: sidebarWidth)
 
-                // Center: switch between Editor, Corkboard, Story Bible
-                Group {
-                    if showStoryBible {
-                        StoryBibleView(
+                // Center column: editor area on top, bottom panel below
+                VStack(spacing: 0) {
+                    // Editor / Corkboard / Story Bible
+                    Group {
+                        if showStoryBible {
+                            StoryBibleView(
+                                state: state,
+                                bgPrimary: bgPrimary,
+                                bgSecondary: bgSecondary,
+                                accent: accent,
+                                textPrimary: textPrimary,
+                                textSecondary: textSecondary,
+                                textMuted: textMuted,
+                                border: border
+                            )
+                        } else if viewMode == .corkboard {
+                            CorkboardView(
+                                state: state,
+                                bgPrimary: bgPrimary,
+                                bgSecondary: bgSecondary,
+                                accent: accent,
+                                textPrimary: textPrimary,
+                                textSecondary: textSecondary,
+                                textMuted: textMuted,
+                                border: border,
+                                onSelectChapter: { chapter in
+                                    Task { await state.selectChapter(chapter) }
+                                }
+                            )
+                        } else {
+                            EditorView(
+                                state: state,
+                                bgPrimary: bgPrimary,
+                                bgSecondary: bgSecondary,
+                                accent: accent,
+                                accentDim: accentDim,
+                                textPrimary: textPrimary,
+                                textSecondary: textSecondary,
+                                textMuted: textMuted,
+                                border: border
+                            )
+                        }
+                    }
+                    .frame(maxHeight: panel.isVisible ? max(100, geo.size.height - panel.height - 30) : .infinity)
+
+                    if panel.isVisible {
+                        PanelContainer(
                             state: state,
+                            panel: panel,
+                            bg: bgSecondary,
                             bgPrimary: bgPrimary,
-                            bgSecondary: bgSecondary,
                             accent: accent,
                             textPrimary: textPrimary,
                             textSecondary: textSecondary,
                             textMuted: textMuted,
                             border: border
                         )
-                    } else if viewMode == .corkboard {
-                        CorkboardView(
-                            state: state,
-                            bgPrimary: bgPrimary,
-                            bgSecondary: bgSecondary,
-                            accent: accent,
-                            textPrimary: textPrimary,
-                            textSecondary: textSecondary,
-                            textMuted: textMuted,
-                            border: border,
-                            onSelectChapter: { chapter in
-                                Task { await state.selectChapter(chapter) }
-                            }
-                        )
-                    } else {
-                        EditorView(
-                            state: state,
-                            bgPrimary: bgPrimary,
-                            bgSecondary: bgSecondary,
-                            accent: accent,
-                            accentDim: accentDim,
-                            textPrimary: textPrimary,
-                            textSecondary: textSecondary,
-                            textMuted: textMuted,
-                            border: border
-                        )
+                        .frame(height: panel.height)
                     }
                 }
-
-                AIAssistantView(
-                    state: state,
-                    bg: bgSecondary,
-                    bgPrimary: bgPrimary,
-                    accent: accent,
-                    accentDim: accentDim,
-                    textPrimary: textPrimary,
-                    textSecondary: textSecondary,
-                    textMuted: textMuted,
-                    border: border,
-                    width: aiWidth
-                )
-                .frame(width: aiWidth)
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .background(bgPrimary)
+            .onAppear { panel.clampHeight(for: geo.size.height) }
+            .onChange(of: geo.size.height) { _, h in panel.clampHeight(for: h) }
         }
         .ignoresSafeArea()
         .task {
             await state.loadProjects()
             await LLMRegistry.shared.detectAndSelect()
+            registerPanelTabs()
         }
         .onChange(of: state.backendError) { _, newError in
             if let error = newError {
@@ -144,6 +153,49 @@ struct MainView: View {
                 },
                 onCancel: { showNewChapter = false }
             )
+        }
+    }
+
+    private func registerPanelTabs() {
+        // Register each tab with the panel registry. Each builder takes the
+        // AppState and returns an AnyView. Theme colors come from MainView's
+        // stored properties.
+        let bg = bgSecondary
+        let bgP = bgPrimary
+        let ac = accent
+        let acD = accentDim
+        let tP = textPrimary
+        let tS = textSecondary
+        let tM = textMuted
+        let br = border
+
+        PanelTabRegistry.shared.register("assistant") { state in
+            AnyView(AIAssistantView(
+                state: state,
+                bg: bg, bgPrimary: bgP, accent: ac, accentDim: acD,
+                textPrimary: tP, textSecondary: tS, textMuted: tM, border: br,
+                width: 0
+            ))
+        }
+        PanelTabRegistry.shared.register("terminal") { state in
+            AnyView(TerminalTab(
+                state: state,
+                bgPrimary: bgP, bgSecondary: bg, accent: ac,
+                textPrimary: tP, textSecondary: tS, textMuted: tM, border: br
+            ))
+        }
+        PanelTabRegistry.shared.register("inbox") { state in
+            AnyView(InboxTab(
+                state: state,
+                bg: bg, bgPrimary: bgP, accent: ac,
+                textPrimary: tP, textSecondary: tS, textMuted: tM, border: br
+            ))
+        }
+        PanelTabRegistry.shared.register("logs") { _ in
+            AnyView(LogsTab(
+                bg: bg, bgPrimary: bgP, accent: ac,
+                textPrimary: tP, textSecondary: tS, textMuted: tM, border: br
+            ))
         }
     }
 }

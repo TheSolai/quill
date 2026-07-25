@@ -842,3 +842,185 @@ class TestEditFix:
             d = r.get_json()
             # Should have used the default instruction
             assert d["instruction"] == "fix typos and grammar"
+
+
+# --------------------------------------------------------------------------
+# MCP endpoint (JSON-RPC 2.0 over HTTP)
+# --------------------------------------------------------------------------
+
+class TestMCPEndpoint:
+    """Tests for /api/mcp — HTTP JSON-RPC 2.0 endpoint that exposes Quill
+    tools to MCP-compatible clients (Claude Desktop, Cursor, etc.).
+    Mirrors the stdio server in Helpers/quill-ai-helper.swift."""
+
+    def _post(self, client, method, params=None, req_id=1):
+        return client.post("/api/mcp", json={
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": method,
+            "params": params or {},
+        })
+
+    def test_initialize(self, client):
+        r = self._post(client, "initialize")
+        assert r.status_code == 200
+        d = r.get_json()
+        assert d["jsonrpc"] == "2.0"
+        assert d["id"] == 1
+        assert d["result"]["serverInfo"]["name"] == "quill"
+        assert "tools" in d["result"]["capabilities"]
+
+    def test_tools_list(self, client):
+        r = self._post(client, "tools/list")
+        assert r.status_code == 200
+        d = r.get_json()
+        tools = [t["name"] for t in d["result"]["tools"]]
+        # Core tools
+        assert "list_projects" in tools
+        assert "edit_fix" in tools
+        assert "search_web" in tools
+        assert "shell_exec" in tools
+        assert "list_files" in tools
+        assert "read_file" in tools
+        assert "send_email" in tools
+        assert "list_inbox" in tools
+
+    def test_tools_list_schema_format(self, client):
+        """Each tool should have a proper MCP inputSchema."""
+        r = self._post(client, "tools/list")
+        tools = r.get_json()["result"]["tools"]
+        for tool in tools:
+            assert "name" in tool
+            assert "description" in tool
+            assert "inputSchema" in tool
+            assert tool["inputSchema"]["type"] == "object"
+
+    def test_invalid_jsonrpc_version(self, client):
+        r = client.post("/api/mcp", json={
+            "jsonrpc": "1.0", "id": 1, "method": "initialize", "params": {}
+        })
+        assert r.status_code == 400
+
+    def test_unknown_method(self, client):
+        r = self._post(client, "nonexistent/method")
+        assert r.status_code == 404
+        assert r.get_json()["error"]["code"] == -32601
+
+    def test_tools_call_missing_name(self, client):
+        r = self._post(client, "tools/call", {"arguments": {}})
+        assert r.status_code == 400
+        assert r.get_json()["error"]["code"] == -32602
+
+    def test_tools_call_unknown_tool(self, client):
+        r = self._post(client, "tools/call", {"name": "fake_tool", "arguments": {}})
+        assert r.status_code == 200
+        result = r.get_json()["result"]
+        assert "unknown tool" in result["content"][0]["text"].lower() or result.get("isError")
+
+    def test_list_projects_tool(self, client):
+        r = self._post(client, "tools/call", {"name": "list_projects", "arguments": {}})
+        assert r.status_code == 200
+        result = r.get_json()["result"]
+        # Result is JSON-encoded in the text content
+        text = result["content"][0]["text"]
+        parsed = json.loads(text)
+        assert isinstance(parsed, list)
+        # No __context__ pseudo-projects
+        for p in parsed:
+            assert not p["id"].startswith("__")
+
+    def test_edit_fix_tool(self, client):
+        from unittest.mock import patch, MagicMock
+        from slot_providers import PROVIDERS
+        client.post("/api/slots/gemma4-fast/activate")
+        mock_inst = MagicMock()
+        mock_inst.chat.return_value = "fixed via MCP"
+        with patch.dict(PROVIDERS, {"ollama": MagicMock(return_value=mock_inst)}):
+            r = self._post(client, "tools/call", {
+                "name": "edit_fix",
+                "arguments": {"text": "helo wrold", "instruction": "fix"},
+            })
+            assert r.status_code == 200
+            result = r.get_json()["result"]
+            assert result["isError"] is False
+            text = result["content"][0]["text"]
+            assert "fixed via MCP" in text
+
+    def test_edit_fix_tool_empty_text(self, client):
+        r = self._post(client, "tools/call", {
+            "name": "edit_fix",
+            "arguments": {"text": ""},
+        })
+        assert r.status_code == 200
+        result = r.get_json()["result"]
+        # Should have an error or empty response
+        assert result.get("isError") or "error" in result["content"][0]["text"].lower()
+
+    def test_shell_exec_tool_blocks_dangerous(self, client):
+        """MCP shell_exec should route through the safety-checked tool."""
+        r = self._post(client, "tools/call", {
+            "name": "shell_exec",
+            "arguments": {"cmd": "rm -rf /"},
+        })
+        assert r.status_code == 200
+        result = r.get_json()["result"]
+        text = result["content"][0]["text"]
+        assert "blocked" in text.lower() or "error" in text.lower()
+
+    def test_list_files_tool(self, client):
+        r = self._post(client, "tools/call", {
+            "name": "list_files",
+            "arguments": {"path": "/tmp"},
+        })
+        assert r.status_code == 200
+        result = r.get_json()["result"]
+        assert result["isError"] is False
+
+    def test_search_web_tool(self, client):
+        r = self._post(client, "tools/call", {
+            "name": "search_web",
+            "arguments": {"query": "swift programming", "max_results": 3},
+        })
+        assert r.status_code == 200
+        result = r.get_json()["result"]
+        text = result["content"][0]["text"]
+        # Real network call — may or may not return results
+        parsed = json.loads(text) if text.startswith("{") else {}
+        assert "results" in parsed or "error" in parsed
+
+    def test_write_then_read_chapter(self, client):
+        """End-to-end: write a chapter via MCP, then read it back."""
+        # Create a project first
+        r = client.post("/api/projects", json={"name": "mcp-test"})
+        pid = r.get_json()["id"]
+        # Write
+        r = self._post(client, "tools/call", {
+            "name": "write_chapter",
+            "arguments": {
+                "project_id": pid,
+                "chapter": "chapter-1",
+                "content": "# Chapter 1\n\nIt was a dark and stormy night.",
+            },
+        })
+        assert r.status_code == 200
+        # Read back
+        r = self._post(client, "tools/call", {
+            "name": "read_chapter",
+            "arguments": {"project_id": pid, "chapter": "chapter-1"},
+        })
+        assert r.status_code == 200
+        result = r.get_json()["result"]
+        text = result["content"][0]["text"]
+        parsed = json.loads(text)
+        assert "dark and stormy night" in parsed["content"]
+
+    def test_invalid_project_id_rejected(self, client):
+        r = self._post(client, "tools/call", {
+            "name": "list_chapters",
+            "arguments": {"project_id": "../etc"},
+        })
+        assert r.status_code == 200
+        result = r.get_json()["result"]
+        # Should return an error
+        text = result["content"][0]["text"].lower()
+        assert "error" in text or "invalid" in text

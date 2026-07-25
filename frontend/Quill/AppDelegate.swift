@@ -118,10 +118,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         toggleSidebarItem.target = self
         viewMenu.addItem(toggleSidebarItem)
 
-        let toggleAIItem = NSMenuItem(title: "Toggle AI Panel", action: #selector(toggleAI), keyEquivalent: "a")
-        toggleAIItem.keyEquivalentModifierMask = [.command, .control]
-        toggleAIItem.target = self
-        viewMenu.addItem(toggleAIItem)
+        viewMenu.addItem(NSMenuItem.separator())
+
+        // Panel toggle (Cmd+J, like Zed)
+        let togglePanelItem = NSMenuItem(title: "Toggle Panel", action: #selector(togglePanel), keyEquivalent: "j")
+        togglePanelItem.target = self
+        viewMenu.addItem(togglePanelItem)
+
+        // Tab submenu
+        let tabsSubmenu = NSMenu(title: "Tabs")
+        for tab in PanelState.shared.allTabs {
+            let item = NSMenuItem(
+                title: tab.title,
+                action: #selector(toggleTabFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = tab.id
+            tabsSubmenu.addItem(item)
+        }
+        let tabsMenuItem = NSMenuItem(title: "Panel Tabs", action: nil, keyEquivalent: "")
+        tabsMenuItem.submenu = tabsSubmenu
+        viewMenu.addItem(tabsMenuItem)
 
         viewMenu.addItem(NSMenuItem.separator())
         let fullScreenItem = NSMenuItem(title: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
@@ -131,6 +149,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let viewMenuItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
+
+        // Refresh menu state when items are about to display
+        viewMenu.autoenablesItems = false
+        tabsSubmenu.autoenablesItems = false
 
         // Window menu
         let windowMenu = NSMenu(title: "Window")
@@ -183,8 +205,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.post(name: .toggleSidebar, object: nil)
     }
 
-    @objc func toggleAI() {
-        NotificationCenter.default.post(name: .toggleAIPanel, object: nil)
+    @objc func togglePanel() {
+        Task { @MainActor in
+            PanelState.shared.togglePanel()
+        }
+    }
+
+    @objc func toggleTabFromMenu(_ sender: NSMenuItem) {
+        guard let tabId = sender.representedObject as? String else { return }
+        Task { @MainActor in
+            PanelState.shared.toggleTab(tabId)
+        }
+    }
+
+    // Validate menu items: check/uncheck tabs based on PanelState
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        Task { @MainActor in
+            for item in menu.items {
+                if let tabId = item.representedObject as? String {
+                    let isHidden = PanelState.shared.hiddenTabIds.contains(tabId)
+                    item.state = isHidden ? .off : .on
+                }
+            }
+        }
     }
 
     @objc func showHelp() {
