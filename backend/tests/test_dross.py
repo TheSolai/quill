@@ -1515,3 +1515,58 @@ class TestServerInfoEndpoint:
         assert "ollama_url" in d
         assert "agentmail_inbox" in d
         assert d["skills"]["count"] > 0
+
+
+# --------------------------------------------------------------------------
+# Chapter-write with no project selected (auto-create "default" project)
+# --------------------------------------------------------------------------
+
+class TestChapterWriteNoProject:
+    """The bug: 'create chapter 1' with no project selected silently failed
+    because the chat endpoint required `project_id != "default"`. Now the
+    server auto-creates a 'default' project so the user can write chapters
+    without first setting up a project."""
+
+    def test_create_chapter_with_default_project_id(self, client):
+        """Send a 'create chapter 1' with project_id=default. Should create
+        a default project and write the chapter."""
+        from unittest.mock import patch, MagicMock
+        from slot_providers import PROVIDERS
+        # Activate an ollama slot so the endpoint has a model
+        client.post("/api/slots/gemma4-fast/activate")
+        mock_inst = MagicMock()
+        mock_inst.chat.return_value = "It was a dark and stormy night."
+        with patch.dict(PROVIDERS, {"ollama": MagicMock(return_value=mock_inst)}):
+            r = client.post("/api/chat", json={
+                "project_id": "default",
+                "messages": [{"role": "user", "content": "create chapter 1"}],
+                "stream": False,
+            })
+            assert r.status_code == 200
+            d = r.get_json()
+            assert d.get("chapter_written") == "chapter-01"
+            assert d.get("project_id") == "default"
+            # File should exist in the default project
+            import os
+            fp = os.path.expanduser("~/Quill/projects/default/chapter-01.md")
+            assert os.path.exists(fp), f"file not created at {fp}"
+            with open(fp) as f:
+                content = f.read()
+            assert "dark and stormy" in content
+
+    def test_create_chapter_with_empty_project_id(self, client):
+        """Empty project_id should also work — treated as default."""
+        from unittest.mock import patch, MagicMock
+        from slot_providers import PROVIDERS
+        client.post("/api/slots/gemma4-fast/activate")
+        mock_inst = MagicMock()
+        mock_inst.chat.return_value = "Empty ID test."
+        with patch.dict(PROVIDERS, {"ollama": MagicMock(return_value=mock_inst)}):
+            r = client.post("/api/chat", json={
+                "project_id": "",
+                "messages": [{"role": "user", "content": "create chapter 2"}],
+                "stream": False,
+            })
+            # Empty string is treated as "default"
+            d = r.get_json()
+            assert d.get("chapter_written") is not None

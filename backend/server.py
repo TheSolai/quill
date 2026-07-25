@@ -471,9 +471,29 @@ def chat_completion():
     # we generate the prose (non-streaming) and save it to the chapter file
     # on disk. Then we return the result with a `chapter_written` field so
     # the Swift UI can refresh the editor.
+    #
+    # Critical: the write intent fires REGARDLESS of which project is selected.
+    # If project_id is "default" or empty, we create a "default" project so the
+    # user can just say "create chapter 1" without first having to set up a
+    # project. This is the bug the user hit when their first attempt at chapter
+    # creation silently failed because no project was selected.
     write_intent = _extract_chapter_write_intent(last_user) if last_user else None
-    if write_intent and project_id != "default":
-        target_chapter = _resolve_chapter_target(project_id, write_intent["target"])
+    if write_intent:
+        # Resolve to a real project_id — auto-create the "default" project if needed
+        effective_project_id = project_id if project_id and project_id != "default" else "default"
+        if effective_project_id == "default":
+            # Create the default project on demand so chapter writes always have a home
+            ensure_base_dir()
+            default_dir = BASE_DIR / "default"
+            if not default_dir.exists():
+                default_dir.mkdir(parents=True, exist_ok=True)
+                # Save initial context so future project selections work
+                ctx = get_project_context("default")
+                if not ctx.get("default_initialized"):
+                    ctx["default_initialized"] = True
+                    ctx["summary"] = "Default project — created automatically when you said 'create chapter 1'."
+                    save_project_context("default", ctx)
+        target_chapter = _resolve_chapter_target(effective_project_id, write_intent["target"])
         if target_chapter:
             # Use a focused prose-only system prompt so the model writes the
             # chapter directly without preamble, meta-commentary, or follow-up
@@ -517,25 +537,26 @@ def chat_completion():
                 # Clean up common wrappers the model might add
                 prose = _strip_chapter_wrapper(prose)
                 # Save to chapter file (append, don't overwrite existing content)
-                existing = read_chapter(project_id, target_chapter) or f"# {target_chapter}\n\n"
+                existing = read_chapter(effective_project_id, target_chapter) or f"# {target_chapter}\n\n"
                 new_content = existing.rstrip() + "\n\n" + prose.strip() + "\n"
-                write_chapter(project_id, target_chapter, new_content)
+                write_chapter(effective_project_id, target_chapter, new_content)
                 # Also track as "current chapter" for subsequent actions
-                ctx = get_project_context(project_id)
+                ctx = get_project_context(effective_project_id)
                 ctx["current_chapter"] = target_chapter
-                save_project_context(project_id, ctx)
+                save_project_context(effective_project_id, ctx)
                 if data.get("stream", True):
                     def gen_write():
                         # Stream the prose so the user sees it appear
                         chunk_size = 80
                         for i in range(0, len(prose), chunk_size):
                             yield f"data: {json.dumps({'token': prose[i:i+chunk_size]})}\n\n"
-                        yield f"data: {json.dumps({'done': True, 'chapter_written': target_chapter, 'project_id': project_id, 'streamed_chars': len(prose)})}\n\n"
+                        yield f"data: {json.dumps({'done': True, 'chapter_written': target_chapter, 'project_id': effective_project_id, 'streamed_chars': len(prose)})}\n\n"
                     return Response(gen_write(), mimetype="text/event-stream",
                                     headers={"Cache-Control": "no-cache"})
                 return {"text": prose, "slot_id": slot_id,
                         "model_id": slot.model_id,
                         "chapter_written": target_chapter,
+                        "project_id": effective_project_id,
                         "streamed_chars": len(prose)}
             except Exception as e:
                 return {"error": f"chapter write failed: {e}"}, 500

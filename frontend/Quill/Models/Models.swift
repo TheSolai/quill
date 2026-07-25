@@ -887,6 +887,9 @@ class AppState: ObservableObject {
             ])
         }
 
+        // If no project is selected, the backend will auto-create a "default"
+        // project when the user asks for a chapter. This lets the user start
+        // writing without setting up a project first.
         let projectId = currentProject?.id ?? "default"
         let payload: [String: Any] = [
             "project_id": projectId,
@@ -925,26 +928,48 @@ class AppState: ObservableObject {
                         if let idx = self.messages.firstIndex(where: { $0.id == assistantMsgId }) {
                             self.messages[idx].isStreaming = false
                         }
-                        // If Quill wrote to a chapter, refresh the editor
+                        // If Quill wrote to a chapter, refresh the editor.
+                        // If the chapter was written to a different project (e.g.
+                        // the auto-created "default" project), switch to it first.
                         if let written = meta["chapter_written"] as? String,
                            let pid = meta["project_id"] as? String {
                             chapterWritten = written
-                            print("[Quill] Quill wrote to chapter: \(written)")
-                            // Reload the chapter into the editor
-                            if self.currentChapter?.name == written || self.currentChapter == nil {
-                                if let ch = self.chapters.first(where: { $0.name == written }) {
-                                    await self.selectChapter(ch)
+                            print("[Quill] Quill wrote to chapter: \(written) in project: \(pid)")
+                            // If the server wrote to a project we're not currently on,
+                            // switch to it so the user sees the file.
+                            if self.currentProject?.id != pid {
+                                print("[Quill] Switching to project: \(pid)")
+                                await self.loadProjects()
+                                if let newProj = self.projects.first(where: { $0.id == pid }) {
+                                    await self.selectProject(newProj)
                                 }
-                            } else {
-                                // Force reload of the current chapter's content
+                            }
+                            // Make sure the chapter list is loaded for this project
+                            if self.chapters.isEmpty || self.currentProject?.id == pid && self.chapters.isEmpty {
+                                await self.loadChapters()
+                            }
+                            // Select the new chapter (or reload current)
+                            if let ch = self.chapters.first(where: { $0.name == written }) {
+                                await self.selectChapter(ch)
+                            } else if self.currentChapter?.name == written {
                                 if let ch = self.currentChapter {
                                     await self.loadChapterContent(ch)
                                 }
+                            } else {
+                                // Chapter not in list yet — refresh and try again
+                                await self.loadChapters()
+                                if let ch = self.chapters.first(where: { $0.name == written }) {
+                                    await self.selectChapter(ch)
+                                }
                             }
+                            // Toast the success
+                            let chars = meta["streamed_chars"] as? Int
+                            let detail = chars.map { " (\($0) chars)" } ?? ""
+                            ToastCenter.shared.postSuccess("Wrote \(written).md\(detail)")
                             // Show a confirmation in the chat
                             let confirm = ChatMessage(
                                 role: .system,
-                                content: "✓ Quill wrote to `\(written).md` — open the chapter to read it."
+                                content: "✓ Quill wrote to `\(written).md` — opened in the editor."
                             )
                             self.messages.append(confirm)
                         }
