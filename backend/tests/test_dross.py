@@ -784,9 +784,15 @@ class TestEditFix:
         assert _strip_edit_fix_wrapper("```markdown\nfixed text\n```") == "fixed text"
         assert _strip_edit_fix_wrapper("```\nfixed text\n```") == "fixed text"
         assert _strip_edit_fix_wrapper("Here is the corrected text:\n\nfixed text") == "fixed text"
+        assert _strip_edit_fix_wrapper("Here's a condensed version:\n\ncondensed text") == "condensed text"
+        assert _strip_edit_fix_wrapper("Sure, here is the corrected text:\n\nfixed text") == "fixed text"
         assert _strip_edit_fix_wrapper("Corrected text: fixed text") == "fixed text"
         assert _strip_edit_fix_wrapper("  just text  ") == "just text"
         assert _strip_edit_fix_wrapper("no wrapper here") == "no wrapper here"
+        # Multi-sentence preamble with sentence terminator
+        assert _strip_edit_fix_wrapper(
+            "I understand what you're trying to say. Here's the corrected text:\n\nfixed text"
+        ) == "fixed text"
 
     def test_response_shape(self, client):
         """Successful response has text, slot_id, model_id, original_chars, fixed_chars."""

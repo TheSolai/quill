@@ -635,6 +635,7 @@ def edit_fix():
 
 def _strip_edit_fix_wrapper(text: str) -> str:
     """Remove common LLM wrappers from edit-fix output: code fences, preambles."""
+    import re
     s = text.strip()
     # Strip ```markdown / ``` blocks
     if s.startswith("```"):
@@ -645,18 +646,41 @@ def _strip_edit_fix_wrapper(text: str) -> str:
         if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         s = "\n".join(lines).strip()
-    # Strip common preambles
-    for prefix in [
-        "Here is the corrected text:",
-        "Here is the corrected version:",
-        "Corrected text:",
-        "Fixed text:",
-        "Here you go:",
-    ]:
-        if s.lower().startswith(prefix.lower()):
+    # Strip common preambles (case-insensitive)
+    s_lower = s.lower()
+    preambles = [
+        "here is the corrected text:",
+        "here is the corrected version:",
+        "here's the corrected text:",
+        "here's the corrected version:",
+        "here's a condensed version:",
+        "corrected text:",
+        "corrected version:",
+        "fixed text:",
+        "here you go:",
+        "sure! here's the corrected text:",
+        "sure, here is the corrected text:",
+    ]
+    for prefix in preambles:
+        if s_lower.startswith(prefix):
             s = s[len(prefix):].lstrip("\n").lstrip()
-            break
-    return s
+            return s.strip()
+    # Generic preamble: "I understand what you're trying to say. Here's the corrected text: ..."
+    # Pattern: one or two sentences that end with a period, followed by "Here/Here's/Here is/the corrected"
+    m = re.match(
+        r"^(.{1,200}?[\.\?\!])\s+(here'?s?\s+(the\s+)?(a\s+)?(condensed\s+|corrected\s+)?(version|text|rewrite|expanded\s+version)|here\s+is\s+(the\s+)?(a\s+)?(condensed\s+|corrected\s+)?(version|text|rewrite|expanded\s+version))[:\s]+",
+        s,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        s = s[m.end():].lstrip("\n").lstrip()
+        return s.strip()
+    # Another pattern: "Sure, here's a condensed version: ...\n\nactual text"
+    m = re.match(r"^(sure[,!]?|of course[,!]?|certainly[,!]?|absolutely[,!]?)\s+(.{1,200}?[\.\?\!])\s+", s, re.IGNORECASE | re.DOTALL)
+    if m:
+        s = s[m.end():].lstrip("\n").lstrip()
+        return s.strip()
+    return s.strip()
 
 
 def _dross_system_prompt() -> str:
