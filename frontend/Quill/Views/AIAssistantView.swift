@@ -15,6 +15,15 @@ struct AIAssistantView: View {
     @State private var inputText: String = ""
     @State private var generationMode: AppState.GenerationMode = .long
     @State private var outlineHint: String = ""
+    @ObservedObject private var slotRegistry = LLMSlotRegistry.shared
+
+    private var statusLine: String {
+        let model = slotRegistry.activeSlot?.name ?? "—"
+        let shortModel = model.components(separatedBy: " (").first ?? model
+        return generationMode == .long
+            ? "Long form · multi-pass · \(shortModel)"
+            : "Chat · \(shortModel)"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -170,7 +179,7 @@ struct AIAssistantView: View {
                 }
 
                 HStack {
-                    Text(generationMode == .long ? "Long form · multi-pass · gemma4" : "Short form · chat · gemma4")
+                    Text(statusLine)
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundColor(textMuted)
                     Spacer()
@@ -245,7 +254,10 @@ struct AIAssistantView: View {
         guard let lastMsg = state.messages.last,
               lastMsg.role == .assistant,
               !lastMsg.isStreaming,
-              !lastMsg.content.isEmpty else { return }
+              !lastMsg.content.isEmpty,
+              let chapter = state.currentChapter,
+              let project = state.currentProject else { return }
+        // Update local content
         if state.chapterContent.isEmpty {
             state.chapterContent = lastMsg.content
         } else {
@@ -254,6 +266,18 @@ struct AIAssistantView: View {
         state.isDirty = true
         state.updateWordCount()
         state.statusMessage = "Applied to chapter"
+        // Persist to backend (saves the chapter file on disk)
+        Task {
+            do {
+                _ = try await BackendService.shared.put(
+                    "/api/projects/\(project.id)/chapters/\(chapter.name)/content",
+                    body: ["content": state.chapterContent]
+                )
+                await MainActor.run { state.isDirty = false }
+            } catch {
+                print("[Quill] applyToChapter save failed: \(error)")
+            }
+        }
     }
 }
 

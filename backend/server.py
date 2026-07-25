@@ -362,6 +362,56 @@ def chat_completion():
         return {"text": result.get("message", ""), "slot_id": slot_id,
                 "model_id": slot.model_id, "email": result}
 
+    # Chapter-write intent: when user says "write chapter N" / "draft this chapter"
+    # we generate the prose (non-streaming) and save it to the chapter file
+    # on disk. Then we return the result with a `chapter_written` field so
+    # the Swift UI can refresh the editor.
+    write_intent = _extract_chapter_write_intent(last_user) if last_user else None
+    if write_intent and project_id != "default":
+        target_chapter = _resolve_chapter_target(project_id, write_intent["target"])
+        if target_chapter:
+            # Build messages with Dross persona
+            system = data.get("system") or _dross_system_prompt()
+            full_messages = [{"role": "system", "content": system}] + messages
+            try:
+                provider = _slot_providers.get_provider(slot)
+            except Exception as e:
+                return {"error": f"provider init failed: {e}"}, 500
+            overrides = {}
+            if "max_tokens" in data:
+                overrides["max_tokens"] = data["max_tokens"]
+            else:
+                overrides["max_tokens"] = 4000
+            if "temperature" in data:
+                overrides["temperature"] = data["temperature"]
+            if "top_p" in data:
+                overrides["top_p"] = data["top_p"]
+            try:
+                # Generate the prose (non-streaming for simplicity)
+                prose = provider.chat(full_messages, **overrides)
+                # Save to chapter file (append, don't overwrite existing content)
+                existing = read_chapter(project_id, target_chapter) or f"# {target_chapter}\n\n"
+                new_content = existing.rstrip() + "\n\n" + prose.strip() + "\n"
+                write_chapter(project_id, target_chapter, new_content)
+                # Also track as "current chapter" for subsequent actions
+                ctx = get_project_context(project_id)
+                ctx["current_chapter"] = target_chapter
+                save_project_context(project_id, ctx)
+                if data.get("stream", True):
+                    def gen_write():
+                        # Stream the prose so the user sees it appear
+                        chunk_size = 80
+                        for i in range(0, len(prose), chunk_size):
+                            yield f"data: {json.dumps({'token': prose[i:i+chunk_size]})}\n\n"
+                        yield f"data: {json.dumps({'done': True, 'chapter_written': target_chapter, 'project_id': project_id})}\n\n"
+                    return Response(gen_write(), mimetype="text/event-stream",
+                                    headers={"Cache-Control": "no-cache"})
+                return {"text": prose, "slot_id": slot_id,
+                        "model_id": slot.model_id,
+                        "chapter_written": target_chapter}
+            except Exception as e:
+                return {"error": f"chapter write failed: {e}"}, 500
+
     stream = data.get("stream", True)
     overrides = {}
     if "system" in data:
@@ -478,6 +528,74 @@ def _handle_email_intent(intent: dict, project_id: str) -> dict:
             subject = subject if intent.get("subject") else f"Manuscript: {_t}"
 
     return _agentmail.send_email(to=to, subject=subject, text=text)
+
+
+# --------------------------------------------------------------------------
+# Chapter-write intent: when the user asks Dross to "write chapter X" or
+# "draft this chapter", the AI's response is automatically written to the
+# chapter file on disk (not just shown in the chat).
+# --------------------------------------------------------------------------
+
+# Cues that suggest the user wants prose written into a chapter
+CHAPTER_WRITE_CUES = re.compile(
+    r"\b(write|draft|fill|generate|create|compose|expand|continue)\b"
+    r"[^.]*?"
+    r"\b(chapter|scene|opening|next\s+paragraph|next\s+scene|continuation)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_chapter_write_intent(text: str) -> Optional[dict]:
+    """Detect a chapter-write request. Returns dict or None."""
+    if not CHAPTER_WRITE_CUES.search(text):
+        return None
+    # Try to extract a chapter number or name
+    m_num = re.search(r"chapter\s+(\d+|[a-z]+)\b", text, re.IGNORECASE)
+    target_chapter = None
+    if m_num:
+        num = m_num.group(1)
+        if num.isdigit():
+            target_chapter = f"chapter-{int(num):02d}"
+        else:
+            target_chapter = f"chapter-{num.lower()}"
+    m_scene = re.search(r"scene\s+(\d+|[a-z]+)\b", text, re.IGNORECASE)
+    if m_scene and not target_chapter:
+        target_chapter = f"scene-{m_scene.group(1).lower()}"
+    # Word "this" or "current" implies the current chapter
+    if not target_chapter and re.search(r"\b(this|current)\s+(chapter|scene)\b", text, re.IGNORECASE):
+        target_chapter = "current"
+    if not target_chapter:
+        return {"action": "write_chapter", "target": "current"}
+    return {"action": "write_chapter", "target": target_chapter}
+
+
+def _resolve_chapter_target(project_id: str, target: str) -> Optional[str]:
+    """Resolve a chapter target to an actual chapter name in the project."""
+    project_dir = get_project_dir(project_id)
+    files = sorted([f for f in project_dir.glob("*.md") if f.is_file()],
+                   key=lambda p: natural_sort_key(p.stem))
+    if not files:
+        return None
+    if target == "current":
+        # Use project context's current_chapter or first file
+        ctx = get_project_context(project_id)
+        cur = ctx.get("current_chapter")
+        if cur and (project_dir / f"{cur}.md").exists():
+            return cur
+        return files[0].stem
+    # Direct match
+    if (project_dir / f"{target}.md").exists():
+        return target
+    # Try fuzzy match
+    for f in files:
+        if f.stem.lower() == target.lower():
+            return f.stem
+    # Try numeric — chapter-1 matches "1"
+    for f in files:
+        m = re.match(r"chapter[_\-\s]?(\d+)", f.stem, re.IGNORECASE)
+        if m and target.endswith(m.group(1)):
+            return f.stem
+    return None
 
 
 # ---- AgentMail (Dross's email account: thedross@agentmail.to) ----

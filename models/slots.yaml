@@ -11,13 +11,16 @@ slots:
     top_k: 60
     num_ctx: 8192
   purpose: creative
+  category: creative
+  tool_calling: true
+  thinking: true
   is_default: true
   metadata:
     vram: 24GB
     speed: fast
     quality: very_high
     notes: Apple Silicon MLX runtime via Ollama. Best default for literary prose.
-  created_at: 1784986777.9127638
+  created_at: 1784993425.320676
 - id: gemma4-fast
   name: Gemma 4 8B (Local, fast)
   type: ollama
@@ -29,13 +32,16 @@ slots:
     top_p: 0.92
     num_ctx: 8192
   purpose: creative
+  category: creative
+  tool_calling: true
+  thinking: true
   is_default: false
   metadata:
     vram: 8GB
     speed: very_fast
     quality: high
     notes: Quick drafts. Lower quality but very fast.
-  created_at: 1784986777.9127731
+  created_at: 1784993425.320679
 - id: qwen3-30b
   name: Qwen 3 30B (Local, long-context)
   type: ollama
@@ -47,13 +53,16 @@ slots:
     top_p: 0.9
     num_ctx: 32768
   purpose: creative
+  category: creative
+  tool_calling: true
+  thinking: true
   is_default: false
   metadata:
     vram: 24GB
     speed: medium
     quality: very_high
     notes: 32K context. Best for long coherent arcs.
-  created_at: 1784986777.912777
+  created_at: 1784993425.32068
 - id: gpt-oss-20b
   name: GPT-OSS 20B (Local, thinking)
   type: ollama
@@ -65,13 +74,16 @@ slots:
     top_p: 0.9
     num_ctx: 131072
   purpose: research
+  category: research
+  tool_calling: true
+  thinking: true
   is_default: false
   metadata:
     vram: 16GB
     speed: medium
     quality: very_high
     notes: 131K context, thinking-heavy. Good for outlines + structural review.
-  created_at: 1784986777.912779
+  created_at: 1784993425.3206809
 - id: qwen-coder-30b
   name: Qwen 3 Coder 30B (Local, code)
   type: ollama
@@ -82,13 +94,16 @@ slots:
     temperature: 0.2
     num_ctx: 262144
   purpose: code
+  category: code
+  tool_calling: true
+  thinking: false
   is_default: false
   metadata:
     vram: 24GB
     speed: medium
     quality: highest
     notes: 262K context. For code generation.
-  created_at: 1784986777.9127822
+  created_at: 1784993425.320682
 - id: llama3-70b
   name: Llama 3.3 70B (Local, epic)
   type: ollama
@@ -100,13 +115,38 @@ slots:
     top_p: 0.95
     num_ctx: 8192
   purpose: creative
+  category: creative
+  tool_calling: true
+  thinking: false
   is_default: false
   metadata:
     vram: 48GB
     speed: slow
     quality: highest
     notes: Epic-scale narratives. When quality matters most.
-  created_at: 1784986777.9127848
+  created_at: 1784993425.320683
+- id: groq-tool-use
+  name: Llama 3 Groq Tool-Use 8B (Local, agentic)
+  type: ollama
+  model_id: llama3-groq-tool-use:8b
+  endpoint: http://127.0.0.1:11434
+  api_key: null
+  options:
+    temperature: 0.1
+    top_p: 0.9
+    num_ctx: 8192
+  purpose: general
+  category: local
+  tool_calling: true
+  thinking: false
+  is_default: false
+  metadata:
+    vram: 8GB
+    speed: very_fast
+    quality: high
+    notes: Fine-tuned specifically for tool/function calling. Best for Dross as an
+      autonomous agent.
+  created_at: 1784993425.320683
 - id: minimax-text
   name: MiniMax Text 01 (Cloud)
   type: minimax
@@ -118,6 +158,9 @@ slots:
     top_p: 0.9
     max_tokens: 4096
   purpose: general
+  category: minimax
+  tool_calling: false
+  thinking: false
   is_default: false
   metadata:
     vram: cloud
@@ -125,7 +168,7 @@ slots:
     quality: high
     notes: MiniMax's general-purpose text model. Requires MINIMAX_API_KEY env var.
     context: 128000
-  created_at: 1784986777.912788
+  created_at: 1784993425.320684
 - id: minimax-m27
   name: MiniMax M2.7 (Cloud, reasoning)
   type: minimax
@@ -137,14 +180,18 @@ slots:
     top_p: 0.9
     max_tokens: 8192
   purpose: general
+  category: minimax
+  tool_calling: false
+  thinking: true
   is_default: false
   metadata:
     vram: cloud
     speed: medium
     quality: very_high
-    notes: M2.7 with thinking. Strong reasoning + 200K context.
+    notes: M2.7 with thinking. Strong reasoning + 200K context. Needs ~500-1000 tokens
+      of headroom for reasoning.
     context: 200000
-  created_at: 1784986777.91279
+  created_at: 1784993425.320684
 - id: minimax-highspeed
   name: MiniMax M2.7 Highspeed (Cloud, fast)
   type: minimax
@@ -156,6 +203,9 @@ slots:
     top_p: 0.9
     max_tokens: 4096
   purpose: general
+  category: minimax
+  tool_calling: false
+  thinking: true
   is_default: false
   metadata:
     vram: cloud
@@ -163,4 +213,4 @@ slots:
     quality: high
     notes: Faster variant of M2.7. Lower latency, similar quality.
     context: 200000
-  created_at: 1784986777.912792
+  created_at: 1784993425.3206851

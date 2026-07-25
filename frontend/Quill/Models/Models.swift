@@ -558,72 +558,116 @@ class AppState: ObservableObject {
         let userMsg = ChatMessage(role: .user, content: text)
         messages.append(userMsg)
 
-        do {
-            var payload: [String: Any] = [
-                "task": text,
-                "mode": mode.rawValue,
-                "project_id": currentProject?.id ?? "default",
-                "messages": []
-            ]
-            if !chapter.isEmpty {
-                payload["chapter"] = chapter
-                payload["chapter_content"] = chapterContent
-            }
-            if !outline.isEmpty { payload["outline"] = outline }
-            if !style.isEmpty { payload["style"] = style }
-
-            try await BackendService.shared.streamPost("/api/tasks", body: payload) { _ in false } onToken: { _ in } onFileOp: { [weak self] fileOp in
-                Task { @MainActor in
-                    let sysMsg = ChatMessage(role: .system, content: fileOp.summary, isStreaming: false)
-                    self?.messages.append(sysMsg)
-                    await self?.loadChapters()
-                    if fileOp.success && (fileOp.op == "create_chapter" || fileOp.op == "write_to_chapter") {
-                        if let ch = self?.chapters.first(where: { $0.name == fileOp.target }) {
-                            await self?.selectChapter(ch)
-                        }
-                    }
-                }
-            }
-        } catch {
-            print("[Quill] File op error: \(error)")
+        // Build the conversation history to send to /api/chat
+        let history = messages.filter { !$0.isStreaming }.map { msg in
+            ["role": msg.role.rawValue, "content": msg.content]
+        }
+        var enhancedHistory = history
+        if !chapter.isEmpty {
+            enhancedHistory.append([
+                "role": "user",
+                "content": "[CONTEXT] Target chapter: \(chapter).md. Project style: \(style.isEmpty ? "literary, vivid prose" : style)",
+            ])
+        }
+        // Prepend existing current chapter content so Dross can continue it
+        if !chapterContent.isEmpty && !chapter.isEmpty {
+            let preview = String(chapterContent.prefix(2000))
+            enhancedHistory.append([
+                "role": "user",
+                "content": "[CURRENT CHAPTER CONTENT — continue from where this leaves off]\n\n\(preview)\n[END OF PREVIEW]",
+            ])
         }
 
-        guard let provider = LLMRegistry.shared.selectedProvider else {
-            let errMsg = ChatMessage(role: .assistant, content: "No AI provider available. Enable Ollama or check Apple Intelligence.", isStreaming: false)
-            messages.append(errMsg)
-            return
-        }
+        let projectId = currentProject?.id ?? "default"
+        let payload: [String: Any] = [
+            "project_id": projectId,
+            "messages": enhancedHistory,
+            "stream": true,
+        ]
 
         let assistantMsg = ChatMessage(role: .assistant, content: "", isStreaming: true)
         messages.append(assistantMsg)
-
         isStreaming = true
         streamBuffer = ""
 
-        let history = messages.filter { !$0.isStreaming }.map { msg in
-            msg.role == .system ? ChatMessage(role: .user, content: msg.content) : msg
-        }
+        // Track if Dross wrote to a chapter file (so we can refresh the editor)
+        var chapterWritten: String? = nil
 
-        var enhancedHistory = history
-        if !chapter.isEmpty {
-            enhancedHistory.append(ChatMessage(role: .user, content: "[CONTEXT] Target chapter: \(chapter).md. Project style: \(style.isEmpty ? "literary, vivid prose" : style)"))
-        }
-
-        for await token in provider.generateStream(enhancedHistory) {
-            await MainActor.run {
-                streamBuffer += token
-                if var last = self.messages.popLast() {
-                    last.content = streamBuffer
-                    self.messages.append(last)
+        do {
+            // Use BackendService.streamChat which routes through /api/chat
+            try await BackendService.shared.streamChat(
+                payload: payload,
+                onToken: { [weak self] token in
+                    Task { @MainActor in
+                        guard let self = self else { return }
+                        self.streamBuffer += token
+                        if var last = self.messages.popLast() {
+                            last.content = self.streamBuffer
+                            self.messages.append(last)
+                        }
+                    }
+                },
+                onDone: { [weak self] meta in
+                    Task { @MainActor in
+                        guard let self = self else { return }
+                        self.isStreaming = false
+                        if var last = self.messages.popLast() {
+                            last.isStreaming = false
+                            self.messages.append(last)
+                        }
+                        // If Dross wrote to a chapter, refresh the editor
+                        if let written = meta["chapter_written"] as? String,
+                           let pid = meta["project_id"] as? String {
+                            chapterWritten = written
+                            print("[Quill] Dross wrote to chapter: \(written)")
+                            // Reload the chapter into the editor
+                            if self.currentChapter?.name == written || self.currentChapter == nil {
+                                if let ch = self.chapters.first(where: { $0.name == written }) {
+                                    await self.selectChapter(ch)
+                                }
+                            } else {
+                                // Force reload of the current chapter's content
+                                if let ch = self.currentChapter {
+                                    await self.loadChapterContent(ch)
+                                }
+                            }
+                            // Show a confirmation in the chat
+                            let confirm = ChatMessage(
+                                role: .system,
+                                content: "✓ Dross wrote to `\(written).md` — open the chapter to read it."
+                            )
+                            self.messages.append(confirm)
+                        }
+                        if let email = meta["email"] as? [String: Any] {
+                            let ok = email["ok"] as? Bool ?? false
+                            let summary = ok
+                                ? "✓ Email sent to \((email["to"] as? [String])?.first ?? "")"
+                                : "✗ Email failed: \(email["error"] ?? "unknown")"
+                            self.messages.append(ChatMessage(role: .system, content: summary))
+                        }
+                    }
+                },
+                onError: { [weak self] err in
+                    Task { @MainActor in
+                        guard let self = self else { return }
+                        self.isStreaming = false
+                        if var last = self.messages.popLast() {
+                            last.content = (last.content.isEmpty ? "" : last.content)
+                                + "\n[error: \(err)]"
+                            last.isStreaming = false
+                            self.messages.append(last)
+                        }
+                    }
                 }
-            }
-        }
-
-        await MainActor.run {
-            isStreaming = false
-            if var last = self.messages.popLast() {
-                last.isStreaming = false
-                self.messages.append(last)
+            )
+        } catch {
+            await MainActor.run {
+                isStreaming = false
+                if var last = messages.popLast() {
+                    last.isStreaming = false
+                    last.content += "\n[error: \(error.localizedDescription)]"
+                    messages.append(last)
+                }
             }
         }
     }

@@ -17,19 +17,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "models"))
 
 
-# Use a temp slots dir for the whole test session
-@pytest.fixture(autouse=True)
+# Use a temp slots dir for tests that need isolation
+@pytest.fixture
 def temp_slots_dir(tmp_path, monkeypatch):
-    """Point slot manager at a temp dir so tests don't pollute the real one."""
+    """Point slot manager at a temp dir so tests don't pollute the real one.
+    Not autouse — only tests that need slot isolation should request this."""
     import slots
-    import slot_providers
-
     # Override paths to use tmp_path
     monkeypatch.setattr(slots, "SLOTS_PATH", tmp_path / "slots.yaml")
     monkeypatch.setattr(slots, "ACTIVE_SLOT_PATH", tmp_path / ".active_slot")
-    # Re-import slot_providers so it picks up the patched slots module
-    import importlib
-    importlib.reload(slot_providers)
     yield tmp_path
 
 

@@ -166,6 +166,70 @@ actor BackendService {
             }
         }
     }
+
+    /// Stream a /api/chat response. Calls `onToken` for each streamed token,
+    /// `onDone` with the final metadata (e.g. `chapter_written`, `email`),
+    /// and `onError` on failure.
+    func streamChat(
+        payload: [String: Any],
+        onToken: @escaping (String) -> Void,
+        onDone: @escaping ([String: Any]) -> Void = { _ in },
+        onError: @escaping (String) -> Void = { _ in }
+    ) async throws {
+        let req = try makeRequest(path: "/api/chat", method: "POST", body: payload)
+        let (bytes, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse else {
+            onError("invalid response")
+            return
+        }
+        if http.statusCode >= 400 {
+            let msg = String(data: bytes, encoding: .utf8) ?? "Unknown error"
+            onError("HTTP \(http.statusCode): \(msg)")
+            return
+        }
+        guard let text = String(data: bytes, encoding: .utf8) else {
+            onError("could not decode response")
+            return
+        }
+        var finalMeta: [String: Any] = [:]
+        var streamedAny = false
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.hasPrefix("data: ") { continue }
+            let jsonStr = String(trimmed.dropFirst(6))
+            if let data = jsonStr.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let token = json["token"] as? String {
+                    onToken(token)
+                    streamedAny = true
+                }
+                if let err = json["error"] as? String {
+                    onError(err)
+                }
+                if json["done"] as? Bool == true {
+                    // Carry forward any non-token fields
+                    for (k, v) in json {
+                        if k != "token" && k != "done" {
+                            finalMeta[k] = v
+                        }
+                    }
+                }
+            }
+        }
+        if !streamedAny && finalMeta.isEmpty {
+            // Non-streaming JSON response (stream=false)
+            if let data = text.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let txt = json["text"] as? String {
+                    onToken(txt)
+                }
+                for (k, v) in json where k != "text" {
+                    finalMeta[k] = v
+                }
+            }
+        }
+        onDone(finalMeta)
+    }
 }
 
 // MARK: - File Operation Event

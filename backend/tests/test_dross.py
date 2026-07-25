@@ -387,3 +387,136 @@ class TestDrossSystemPrompt:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# --------------------------------------------------------------------------
+# Chapter-write intent
+# --------------------------------------------------------------------------
+
+class TestChapterWriteIntent:
+    def test_detect_write_chapter_1(self):
+        from server import _extract_chapter_write_intent
+        result = _extract_chapter_write_intent("Write the next chapter 1")
+        assert result is not None
+        assert result["action"] == "write_chapter"
+        assert "1" in result["target"]
+
+    def test_detect_write_chapter_word(self):
+        from server import _extract_chapter_write_intent
+        result = _extract_chapter_write_intent("Draft chapter three about the river")
+        assert result is not None
+        assert "three" in result["target"].lower() or "3" in result["target"]
+
+    def test_detect_write_current(self):
+        from server import _extract_chapter_write_intent
+        result = _extract_chapter_write_intent("Continue writing this chapter")
+        assert result is not None
+        assert result["target"] == "current"
+
+    def test_detect_write_scene(self):
+        from server import _extract_chapter_write_intent
+        result = _extract_chapter_write_intent("Compose a new scene here")
+        assert result is not None
+
+    def test_no_intent_for_random_chat(self):
+        from server import _extract_chapter_write_intent
+        assert _extract_chapter_write_intent("hello how are you") is None
+        assert _extract_chapter_write_intent("what is the meaning of life") is None
+        assert _extract_chapter_write_intent("search for cats") is None
+
+    def test_resolve_chapter_target(self):
+        from server import _resolve_chapter_target
+        # Create a temp project
+        import os
+        from pathlib import Path
+        from server import get_project_dir
+        pid = "test-resolve-xyz"
+        pd = get_project_dir(pid)
+        # Create some chapter files
+        (pd / "chapter-1.md").write_text("# 1\n")
+        (pd / "chapter-2.md").write_text("# 2\n")
+        try:
+            # Direct match
+            assert _resolve_chapter_target(pid, "chapter-1") == "chapter-1"
+            # "current" falls back to first
+            assert _resolve_chapter_target(pid, "current") == "chapter-1"
+            # Numeric
+            assert _resolve_chapter_target(pid, "chapter-2") == "chapter-2"
+            # Non-existent
+            assert _resolve_chapter_target(pid, "chapter-99") is None
+        finally:
+            import shutil
+            shutil.rmtree(pd, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# Slot categories
+# --------------------------------------------------------------------------
+
+class TestSlotCategories:
+    def test_default_slots_have_categories(self):
+        from slots import load_slots
+        for s in load_slots():
+            assert s.category in ("local", "creative", "research", "code", "cloud", "minimax"), \
+                f"slot {s.id} has bad category {s.category}"
+
+    def test_tool_calling_flag_persists(self):
+        from slots import load_slots
+        for s in load_slots():
+            if s.type in ("ollama", "mlx"):
+                # All current Ollama models support tools
+                assert s.tool_calling is True, f"ollama slot {s.id} should have tool_calling=True"
+
+    def test_groq_tool_use_slot_exists(self):
+        from slots import get_slot
+        s = get_slot("groq-tool-use")
+        assert s is not None
+        assert s.model_id == "llama3-groq-tool-use:8b"
+        assert s.tool_calling is True
+
+    def test_api_returns_new_fields(self, client):
+        r = client.get("/api/slots")
+        d = r.get_json()
+        for s in d["slots"]:
+            assert "category" in s, f"slot {s['id']} missing category in API"
+            assert "tool_calling" in s, f"slot {s['id']} missing tool_calling in API"
+            assert "thinking" in s, f"slot {s['id']} missing thinking in API"
+
+
+# --------------------------------------------------------------------------
+# Tool calling in Ollama provider
+# --------------------------------------------------------------------------
+
+class TestOllamaToolCalling:
+    def test_payload_includes_tools(self):
+        from slots import ModelSlot
+        from slot_providers import OllamaProvider
+        # Construct a slot in-memory (no need to write to disk)
+        s = ModelSlot(
+            id="test-tool", name="Test", type="ollama",
+            model_id="groq-tool",
+        )
+        prov = OllamaProvider(s)
+        # Build payload with tools
+        payload = prov._build_payload(
+            [{"role": "user", "content": "What's the weather?"}],
+            {"tools": [{"type": "function", "function": {"name": "weather", "description": "Get weather"}}]},
+            stream=False
+        )
+        assert "tools" in payload
+        assert len(payload["tools"]) == 1
+
+    def test_payload_no_tools(self):
+        from slots import ModelSlot
+        from slot_providers import OllamaProvider
+        s = ModelSlot(
+            id="test-no-tool", name="Test", type="ollama",
+            model_id="gemma4:31b",
+        )
+        prov = OllamaProvider(s)
+        payload = prov._build_payload(
+            [{"role": "user", "content": "Hello"}],
+            {},
+            stream=False
+        )
+        assert "tools" not in payload

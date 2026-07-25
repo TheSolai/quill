@@ -14,13 +14,18 @@ struct LLMSlot: Codable, Identifiable, Equatable, Hashable {
     let hasApiKey: Bool
     let options: [String: AnyCodable]?
     let purpose: String?
+    let category: String?           // "local" | "creative" | "research" | "code" | "cloud" | "minimax"
+    let toolCalling: Bool?          // supports OpenAI-style tool/function calling
+    let thinking: Bool?             // supports thinking/reasoning tokens
     let isDefault: Bool
     let metadata: [String: AnyCodable]?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, type, endpoint, options, purpose, metadata
+        case id, name, type, endpoint, options, purpose, category, metadata
         case modelId = "model_id"
         case hasApiKey = "has_api_key"
+        case toolCalling = "tool_calling"
+        case thinking
         case isDefault = "is_default"
     }
 }

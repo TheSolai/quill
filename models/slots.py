@@ -30,6 +30,7 @@ LEGACY_PATH = Path(__file__).parent / "llm-configs.yaml"
 
 VALID_TYPES = ("ollama", "mlx", "minimax", "lmstudio", "custom")
 VALID_PURPOSES = ("creative", "research", "outline", "code", "general", "critique", "plan")
+VALID_CATEGORIES = ("local", "creative", "research", "code", "cloud", "minimax")
 
 
 @dataclass
@@ -43,6 +44,9 @@ class ModelSlot:
     api_key: Optional[str] = None          # only for cloud providers
     options: dict = field(default_factory=dict)  # temperature, top_p, top_k, num_ctx
     purpose: str = "general"               # creative | research | outline | code | general | critique | plan
+    category: str = "local"                # local | creative | research | code | cloud | minimax
+    tool_calling: bool = False             # supports OpenAI-style tool/function calling
+    thinking: bool = False                 # supports chain-of-thought reasoning tokens
     is_default: bool = False
     metadata: dict = field(default_factory=dict)  # vram, speed, notes
     created_at: float = field(default_factory=time.time)
@@ -85,6 +89,8 @@ class ModelSlot:
             )
         if self.type not in VALID_TYPES:
             errors.append(f"invalid type {self.type!r}: must be one of {VALID_TYPES}")
+        if self.category not in VALID_CATEGORIES:
+            errors.append(f"invalid category {self.category!r}: must be one of {VALID_CATEGORIES}")
         if not self.model_id:
             errors.append("model_id is required")
         if self.purpose not in VALID_PURPOSES:
@@ -122,6 +128,9 @@ DEFAULT_SLOTS = [
         "endpoint": "http://127.0.0.1:11434",
         "options": {"temperature": 0.85, "top_p": 0.92, "top_k": 60, "num_ctx": 8192},
         "purpose": "creative",
+        "category": "creative",
+        "tool_calling": True,
+        "thinking": True,
         "is_default": True,
         "metadata": {
             "vram": "24GB",
@@ -138,6 +147,9 @@ DEFAULT_SLOTS = [
         "endpoint": "http://127.0.0.1:11434",
         "options": {"temperature": 0.9, "top_p": 0.92, "num_ctx": 8192},
         "purpose": "creative",
+        "category": "creative",
+        "tool_calling": True,
+        "thinking": True,
         "metadata": {
             "vram": "8GB",
             "speed": "very_fast",
@@ -153,6 +165,9 @@ DEFAULT_SLOTS = [
         "endpoint": "http://127.0.0.1:11434",
         "options": {"temperature": 0.85, "top_p": 0.9, "num_ctx": 32768},
         "purpose": "creative",
+        "category": "creative",
+        "tool_calling": True,
+        "thinking": True,
         "metadata": {
             "vram": "24GB",
             "speed": "medium",
@@ -168,6 +183,9 @@ DEFAULT_SLOTS = [
         "endpoint": "http://127.0.0.1:11434",
         "options": {"temperature": 0.5, "top_p": 0.9, "num_ctx": 131072},
         "purpose": "research",
+        "category": "research",
+        "tool_calling": True,
+        "thinking": True,
         "metadata": {
             "vram": "16GB",
             "speed": "medium",
@@ -183,6 +201,9 @@ DEFAULT_SLOTS = [
         "endpoint": "http://127.0.0.1:11434",
         "options": {"temperature": 0.2, "num_ctx": 262144},
         "purpose": "code",
+        "category": "code",
+        "tool_calling": True,
+        "thinking": False,
         "metadata": {
             "vram": "24GB",
             "speed": "medium",
@@ -198,11 +219,32 @@ DEFAULT_SLOTS = [
         "endpoint": "http://127.0.0.1:11434",
         "options": {"temperature": 0.8, "top_p": 0.95, "num_ctx": 8192},
         "purpose": "creative",
+        "category": "creative",
+        "tool_calling": True,
+        "thinking": False,
         "metadata": {
             "vram": "48GB",
             "speed": "slow",
             "quality": "highest",
             "notes": "Epic-scale narratives. When quality matters most.",
+        },
+    },
+    {
+        "id": "groq-tool-use",
+        "name": "Llama 3 Groq Tool-Use 8B (Local, agentic)",
+        "type": "ollama",
+        "model_id": "llama3-groq-tool-use:8b",
+        "endpoint": "http://127.0.0.1:11434",
+        "options": {"temperature": 0.1, "top_p": 0.9, "num_ctx": 8192},
+        "purpose": "general",
+        "category": "local",
+        "tool_calling": True,
+        "thinking": False,
+        "metadata": {
+            "vram": "8GB",
+            "speed": "very_fast",
+            "quality": "high",
+            "notes": "Fine-tuned specifically for tool/function calling. Best for Dross as an autonomous agent.",
         },
     },
     # === Cloud: MiniMax ===
@@ -214,6 +256,9 @@ DEFAULT_SLOTS = [
         "endpoint": "https://api.minimax.io/v1/text/chatcompletion_v2",
         "options": {"temperature": 0.85, "top_p": 0.9, "max_tokens": 4096},
         "purpose": "general",
+        "category": "minimax",
+        "tool_calling": False,
+        "thinking": False,
         "metadata": {
             "vram": "cloud",
             "speed": "medium",
@@ -230,6 +275,9 @@ DEFAULT_SLOTS = [
         "endpoint": "https://api.minimax.io/v1/text/chatcompletion_v2",
         "options": {"temperature": 0.7, "top_p": 0.9, "max_tokens": 8192},
         "purpose": "general",
+        "category": "minimax",
+        "tool_calling": False,
+        "thinking": True,
         "metadata": {
             "vram": "cloud",
             "speed": "medium",
@@ -246,6 +294,9 @@ DEFAULT_SLOTS = [
         "endpoint": "https://api.minimax.io/v1/text/chatcompletion_v2",
         "options": {"temperature": 0.85, "top_p": 0.9, "max_tokens": 4096},
         "purpose": "general",
+        "category": "minimax",
+        "tool_calling": False,
+        "thinking": True,
         "metadata": {
             "vram": "cloud",
             "speed": "fast",

@@ -659,7 +659,9 @@ struct MarkdownBlockView: View {
 
 // MARK: - ServerButton
 // A compact dropdown showing the active AI server (slot). Click to switch.
-// This is Dross's "Change server" button — the visible UI for slot management.
+// Slots are organized into sections: Creative / Local / Cloud (MiniMax).
+// Each slot shows a "🛠 tools" badge if it supports tool/function calling,
+// and a "🧠 thinking" badge if it supports reasoning tokens.
 
 struct ServerButton: View {
     let activeSlotId: String
@@ -672,6 +674,24 @@ struct ServerButton: View {
 
     @State private var isHovered: Bool = false
     @State private var showMenu: Bool = false
+
+    /// Sections in display order
+    private static let sectionOrder: [(key: String, title: String, icon: String)] = [
+        ("creative", "Creative (writing)", "pencil.and.outline"),
+        ("local", "Ollama / Local (tool-calling)", "wrench.and.screwdriver"),
+        ("research", "Research & outlines", "magnifyingglass"),
+        ("code", "Code", "chevron.left.forwardslash.chevron.right"),
+        ("minimax", "MiniMax (Cloud)", "cloud"),
+        ("cloud", "Other cloud", "cloud.fill"),
+    ]
+
+    private var groupedSlots: [(title: String, icon: String, slots: [LLMSlot])] {
+        let allSlots = LLMSlotRegistry.shared.slots
+        return Self.sectionOrder.compactMap { section in
+            let matching = allSlots.filter { ($0.category ?? "local") == section.key }
+            return matching.isEmpty ? nil : (section.title, section.icon, matching)
+        }
+    }
 
     var body: some View {
         Button(action: { showMenu.toggle() }) {
@@ -700,69 +720,137 @@ struct ServerButton: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
-        .help("Click to change AI server")
+        .help("Click to change AI server — slots are grouped by category")
         .popover(isPresented: $showMenu, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Image(systemName: "cpu").foregroundColor(accent)
                     Text("AI Server").font(.system(size: 11, weight: .bold))
                     Spacer()
+                    if let active = LLMSlotRegistry.shared.slots.first(where: { $0.id == activeSlotId }),
+                       active.toolCalling == true {
+                        HStack(spacing: 3) {
+                            Image(systemName: "wrench.and.screwdriver.fill")
+                                .font(.system(size: 9))
+                                .foregroundColor(accent)
+                            Text("tools")
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                .foregroundColor(accent)
+                        }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(accent.opacity(0.15))
+                        .cornerRadius(3)
+                    }
                 }
                 .padding(8)
                 .background(accent.opacity(0.1))
                 Divider()
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(LLMSlotRegistry.shared.slots) { slot in
-                            Button(action: {
-                                onSelect(slot.id)
-                                showMenu = false
-                            }) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: iconForType(slot.type))
-                                        .font(.system(size: 10))
-                                        .foregroundColor(slot.id == activeSlotId ? accent : textMuted)
-                                        .frame(width: 14)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        HStack(spacing: 4) {
-                                            Text(slot.name)
-                                                .font(.system(size: 11, weight: .medium))
-                                                .foregroundColor(slot.id == activeSlotId ? textPrimary : Color.secondary)
-                                                .lineLimit(1)
-                                            if slot.isDefault {
-                                                Text("DEFAULT")
-                                                    .font(.system(size: 7, weight: .bold, design: .monospaced))
-                                                    .padding(.horizontal, 3)
-                                                    .padding(.vertical, 1)
-                                                    .background(accent.opacity(0.2))
-                                                    .foregroundColor(accent)
-                                                    .cornerRadius(2)
-                                            }
-                                        }
-                                        Text("\(slot.type) · \(slot.modelId)")
-                                            .font(.system(size: 8, design: .monospaced))
-                                            .foregroundColor(textMuted)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer()
-                                    if slot.id == activeSlotId {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .font(.system(size: 11))
-                                            .foregroundColor(accent)
-                                    }
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(slot.id == activeSlotId ? accent.opacity(0.1) : Color.clear)
-                            }
-                            .buttonStyle(.plain)
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(groupedSlots, id: \.title) { section in
+                            sectionView(title: section.title, icon: section.icon, slots: section.slots)
                         }
                     }
+                    .padding(.vertical, 4)
                 }
-                .frame(maxHeight: 280)
+                .frame(maxHeight: 420)
             }
-            .frame(width: 320)
+            .frame(width: 340)
         }
+    }
+
+    @ViewBuilder
+    private func sectionView(title: String, icon: String, slots: [LLMSlot]) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 9))
+                    .foregroundColor(accent)
+                Text(title.uppercased())
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundColor(textMuted)
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 4)
+            ForEach(slots) { slot in
+                slotRow(slot: slot)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func slotRow(slot: LLMSlot) -> some View {
+        let isActive = slot.id == activeSlotId
+        Button(action: {
+            onSelect(slot.id)
+            showMenu = false
+        }) {
+            HStack(spacing: 8) {
+                Image(systemName: iconForType(slot.type))
+                    .font(.system(size: 10))
+                    .foregroundColor(isActive ? accent : textMuted)
+                    .frame(width: 14)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 4) {
+                        Text(slot.name)
+                            .font(.system(size: 11, weight: isActive ? .bold : .medium))
+                            .foregroundColor(isActive ? textPrimary : Color.secondary)
+                            .lineLimit(1)
+                        if slot.isDefault {
+                            Text("DEFAULT")
+                                .font(.system(size: 7, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 3)
+                                .padding(.vertical, 1)
+                                .background(accent.opacity(0.2))
+                                .foregroundColor(accent)
+                                .cornerRadius(2)
+                        }
+                        if slot.toolCalling == true {
+                            HStack(spacing: 2) {
+                                Image(systemName: "wrench.fill")
+                                    .font(.system(size: 7))
+                                Text("tools")
+                                    .font(.system(size: 7, weight: .bold, design: .monospaced))
+                            }
+                            .foregroundColor(.green)
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(Color.green.opacity(0.15))
+                            .cornerRadius(2)
+                        }
+                        if slot.thinking == true {
+                            HStack(spacing: 2) {
+                                Image(systemName: "brain")
+                                    .font(.system(size: 7))
+                                Text("think")
+                                    .font(.system(size: 7, weight: .bold, design: .monospaced))
+                            }
+                            .foregroundColor(.purple)
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
+                            .background(Color.purple.opacity(0.15))
+                            .cornerRadius(2)
+                        }
+                    }
+                    Text("\(slot.type) · \(slot.modelId)")
+                        .font(.system(size: 8, design: .monospaced))
+                        .foregroundColor(textMuted)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if isActive {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(accent)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(isActive ? accent.opacity(0.1) : Color.clear)
+        }
+        .buttonStyle(.plain)
     }
 
     private var displayName: String {

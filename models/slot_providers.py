@@ -113,12 +113,16 @@ class OllamaProvider(LLMProvider):
             opts["num_predict"] = merged["max_tokens"]
         if "stop" in merged:
             opts["stop"] = merged["stop"]
-        return {
+        payload = {
             "model": self.slot.model_id,
             "messages": messages,
             "stream": stream,
             "options": opts,
         }
+        # Tool calling: pass tools if provided and the model supports them
+        if "tools" in merged and merged["tools"]:
+            payload["tools"] = merged["tools"]
+        return payload
 
     def _chat(self, messages, options):
         url = f"{self._resolve_endpoint()}/api/chat"
@@ -128,7 +132,11 @@ class OllamaProvider(LLMProvider):
         req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=300) as resp:
             result = json.loads(resp.read())
-        return result.get("message", {}).get("content", "")
+        msg = result.get("message", {})
+        # When tool calls happen, the model may return tool_calls instead of content
+        if msg.get("tool_calls"):
+            return json.dumps({"tool_calls": msg["tool_calls"], "content": msg.get("content", "")})
+        return msg.get("content", "")
 
     def _stream(self, messages, options):
         url = f"{self._resolve_endpoint()}/api/chat"
@@ -145,9 +153,14 @@ class OllamaProvider(LLMProvider):
                     chunk = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                token = chunk.get("message", {}).get("content", "")
+                msg = chunk.get("message", {})
+                # Emit content tokens
+                token = msg.get("content", "")
                 if token:
                     yield token
+                # Emit tool call markers (structured JSON the chat endpoint can parse)
+                if msg.get("tool_calls"):
+                    yield json.dumps({"tool_calls": msg["tool_calls"]})
                 if chunk.get("done"):
                     break
 
