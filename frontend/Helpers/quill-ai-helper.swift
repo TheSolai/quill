@@ -58,7 +58,7 @@ func main() async -> Int32 {
     }
 
     // Pass-through: unknown subcommand → shell
-    let known = ["status", "ask", "chat", "fix", "expand", "condense", "slots", "projects", "chapters", "scenes", "search", "email", "mcp", "skills", "claude", "codex", "openclaw", "clawhub", "setup", "help"]
+    let known = ["status", "ask", "chat", "fix", "expand", "condense", "slots", "projects", "chapters", "scenes", "search", "email", "mcp", "skills", "claude", "codex", "openclaw", "clawhub", "mmx", "setup", "help"]
     if !known.contains(cmd) {
         return runShellPassThrough(args)
     }
@@ -84,6 +84,7 @@ func main() async -> Int32 {
         case "codex":     try await cmdCodex(subArgs)
         case "openclaw":  try await cmdOpenclaw(subArgs)
         case "clawhub":   try await cmdClawhub(subArgs)
+        case "mmx":       try await cmdMmx(subArgs)
         case "setup":     try await cmdSetup(subArgs)
         case "help":      printUsage()
         default: break
@@ -136,6 +137,7 @@ func printUsage() {
       codex "PROMPT"               Run OpenAI Codex CLI
       openclaw "PROMPT"            Run OpenClaw agent
       clawhub [search|install]     Manage OpenClaw skills
+      mmx "PROMPT" [--slot ID]     Call MiniMax (cloud) AI — for fast generation
       setup                        Show status of all CLI tools + how to fix issues
 
     Any other command is passed to /bin/sh -c, so you can run:
@@ -631,6 +633,49 @@ func cmdCodex(_ args: [String]) async throws {
     }
 }
 
+func cmdMmx(_ args: [String]) async throws {
+    // quill mmx "<prompt>" — call the MiniMax (cloud) AI slot for fast cloud generation
+    // Also accepts --slot=<id> to pick a specific MiniMax slot
+    // Also accepts --stream to print tokens as they arrive
+    var slot = "minimax-text"
+    var stream = false
+    var promptParts: [String] = []
+    for arg in args {
+        if arg.hasPrefix("--slot=") {
+            slot = String(arg.dropFirst("--slot=".count))
+        } else if arg == "--stream" {
+            stream = true
+        } else {
+            promptParts.append(arg)
+        }
+    }
+    let prompt = promptParts.joined(separator: " ")
+    guard !prompt.isEmpty else {
+        printError("mmx: prompt required")
+        print("usage: quill mmx \"<prompt>\" [--slot=<id>] [--stream]")
+        print("slots: minimax-text, minimax-m27, minimax-highspeed")
+        exit(1)
+    }
+    // Call the chat endpoint with the specified slot
+    let body: [String: Any] = [
+        "slot_id": slot,
+        "messages": [["role": "user", "content": prompt]],
+        "stream": stream,
+    ]
+    do {
+        let result = try await httpPost("/api/chat", body: body) as? [String: Any] ?? [:]
+        if let text = result["text"] as? String {
+            print(text)
+        } else if let err = result["error"] as? String {
+            printError(err)
+        } else {
+            printJSON(result)
+        }
+    } catch {
+        printError("\(error)")
+    }
+}
+
 func cmdSetup(_ args: [String]) async throws {
     // quill setup — show status of all CLI tools and how to fix any issues
     let r = try await httpPost("/api/tools/call", body: [
@@ -696,6 +741,7 @@ func runREPL() async {
             case "codex":     try await cmdCodex(Array(parts.dropFirst()))
             case "openclaw":  try await cmdOpenclaw(Array(parts.dropFirst()))
             case "clawhub":   try await cmdClawhub(Array(parts.dropFirst()))
+            case "mmx":       try await cmdMmx(Array(parts.dropFirst()))
             case "setup":     try await cmdSetup(Array(parts.dropFirst()))
             case "fix":       try await cmdFix(Array(parts.dropFirst()), instruction: "fix typos and grammar")
             case "expand":    try await cmdFix(Array(parts.dropFirst()), instruction: "expand with sensory detail")
@@ -712,11 +758,12 @@ func runREPL() async {
 // MARK: - Shell pass-through
 
 func runShellPassThrough(_ args: [String]) -> Int32 {
+    let cmd = args.joined(separator: " ")
     let process = Process()
     let stdoutPipe = Pipe()
     let stderrPipe = Pipe()
     process.executableURL = URL(fileURLWithPath: "/bin/sh")
-    process.arguments = ["-c", args.joined(separator: " ")]
+    process.arguments = ["-c", cmd]
     process.standardOutput = stdoutPipe
     process.standardError = stderrPipe
     do {
@@ -729,7 +776,19 @@ func runShellPassThrough(_ args: [String]) -> Int32 {
     let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
     let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
     if let s = String(data: outData, encoding: .utf8) { FileHandle.standardOutput.write(Data(s.utf8)) }
-    if let s = String(data: errData, encoding: .utf8) { FileHandle.standardError.write(Data(s.utf8)) }
+    if let s = String(data: errData, encoding: .utf8) {
+        FileHandle.standardError.write(Data(s.utf8))
+        // If the command was "not found", try to suggest a quill command
+        if s.contains("not found"), let firstToken = args.first {
+            if firstToken.hasPrefix("minimax") {
+                FileHandle.standardError.write(Data("💡 minimax is the cloud AI. Use `mmx \"<prompt>\"` or `quill mmx \"<prompt>\"`\n".utf8))
+            } else if firstToken == "mmx" {
+                FileHandle.standardError.write(Data("💡 Use `mmx \"<prompt>\"` to call the MiniMax (cloud) AI. See `quill help`.\n".utf8))
+            } else if ["fix", "ask", "chat", "skills", "setup", "claude", "codex", "openclaw", "clawhub", "quill", "ai", "summarize", "write"].contains(firstToken) {
+                FileHandle.standardError.write(Data("💡 quill command? Try `quill help` or `quill \(firstToken) --help`\n".utf8))
+            }
+        }
+    }
     return process.terminationStatus
 }
 

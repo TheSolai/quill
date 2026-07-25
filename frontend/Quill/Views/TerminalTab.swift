@@ -74,8 +74,21 @@ struct TerminalTab: View {
         .onAppear {
             inputFocused = true
             if entries.isEmpty {
-                addEntry(.info("Quill terminal — type a command and press Return. ↑/↓ for history."))
-                addEntry(.info("Tip: try `quill status`, `quill slots`, `quill projects list`"))
+                addEntry(.info("Quill terminal — a real shell with writer-friendly tools on top."))
+                addEntry(.info("↑/↓ for history, Tab for path completion."))
+                addEntry(.info(""))
+                addEntry(.info("Writer commands (try these!):"))
+                addEntry(.info("  quill status                    # show backend + active model"))
+                addEntry(.info("  quill slots                     # list AI models"))
+                addEntry(.info("  quill ask 'what is 2+2?'        # one-shot Q&A with active model"))
+                addEntry(.info("  mmx 'write a chapter opening'   # call MiniMax (cloud) AI"))
+                addEntry(.info("  quill fix chapter.md            # fix typos in a file in place"))
+                addEntry(.info("  quill chat                      # interactive REPL"))
+                addEntry(.info("  quill skills                    # list OpenClaw skills"))
+                addEntry(.info("  quill setup                     # show status of all CLI tools"))
+                addEntry(.info("  quill --help                    # full help"))
+                addEntry(.info(""))
+                addEntry(.info("Anything else runs in /bin/sh -c. Try `ls`, `git status`, `pwd`."))
             }
         }
     }

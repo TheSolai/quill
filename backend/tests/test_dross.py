@@ -1697,3 +1697,80 @@ class TestCLITools:
         # Should have quill, claude, codex, etc.
         assert "quill" in data
         assert "gemini" in data
+
+
+# --------------------------------------------------------------------------
+# mmx (MiniMax / cloud AI) integration
+# --------------------------------------------------------------------------
+
+class TestMmxEndpoint:
+    """Tests for the /api/chat endpoint with the MiniMax cloud slot."""
+
+    def test_mmx_chat_works(self, client):
+        """Send a chat via the minimax-text slot and verify the response."""
+        from unittest.mock import patch, MagicMock
+        from slot_providers import PROVIDERS
+        client.post("/api/slots/minimax-text/activate")
+        mock_inst = MagicMock()
+        mock_inst.chat.return_value = "4"
+        with patch.dict(PROVIDERS, {"minimax": MagicMock(return_value=mock_inst)}):
+            r = client.post("/api/chat", json={
+                "slot_id": "minimax-text",
+                "messages": [{"role": "user", "content": "what is 2+2?"}],
+                "stream": False,
+            })
+            assert r.status_code == 200
+            d = r.get_json()
+            assert d.get("model_id") == "MiniMax-Text-01"
+            assert d.get("slot_id") == "minimax-text"
+            assert "text" in d
+            # The provider was called with our message
+            mock_inst.chat.assert_called_once()
+            args, kwargs = mock_inst.chat.call_args
+            assert any("2+2" in str(m) for m in args[0])
+
+    def test_mmx_highspeed_slot(self, client):
+        """The highspeed slot also works through the chat endpoint."""
+        from unittest.mock import patch, MagicMock
+        from slot_providers import PROVIDERS
+        client.post("/api/slots/minimax-highspeed/activate")
+        mock_inst = MagicMock()
+        mock_inst.chat.return_value = "fast response"
+        with patch.dict(PROVIDERS, {"minimax": MagicMock(return_value=mock_inst)}):
+            r = client.post("/api/chat", json={
+                "slot_id": "minimax-highspeed",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": False,
+            })
+            assert r.status_code == 200
+            d = r.get_json()
+            assert d.get("slot_id") == "minimax-highspeed"
+            assert d.get("text") == "fast response"
+
+    def test_mmx_m27_reasoning_slot(self, client):
+        """The M2.7 reasoning slot is also routable."""
+        from unittest.mock import patch, MagicMock
+        from slot_providers import PROVIDERS
+        client.post("/api/slots/minimax-m27/activate")
+        mock_inst = MagicMock()
+        mock_inst.chat.return_value = "reasoned response"
+        with patch.dict(PROVIDERS, {"minimax": MagicMock(return_value=mock_inst)}):
+            r = client.post("/api/chat", json={
+                "slot_id": "minimax-m27",
+                "messages": [{"role": "user", "content": "explain"}],
+                "stream": False,
+            })
+            assert r.status_code == 200
+            d = r.get_json()
+            assert d.get("slot_id") == "minimax-m27"
+            assert d.get("model_id") == "MiniMax-M2.7"
+
+    def test_mcp_lists_mmx_via_slots(self, client):
+        """The slots endpoint (used by the AI to discover models) lists all mmx slots."""
+        r = client.get("/api/slots")
+        d = r.get_json()
+        slots = d.get("slots", [])
+        minimax_slots = [s for s in slots if s.get("type") == "minimax"]
+        assert len(minimax_slots) >= 2, f"expected ≥2 mmx slots, got {len(minimax_slots)}"
+        names = {s["name"] for s in minimax_slots}
+        assert any("Text" in n for n in names)
