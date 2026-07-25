@@ -263,21 +263,11 @@ struct AIAssistantView: View {
         } else {
             state.chapterContent += "\n\n" + lastMsg.content
         }
-        state.isDirty = true
+        state.markDirty()
         state.updateWordCount()
         state.statusMessage = "Applied to chapter"
-        // Persist to backend (saves the chapter file on disk)
-        Task {
-            do {
-                _ = try await BackendService.shared.put(
-                    "/api/projects/\(project.id)/chapters/\(chapter.name)/content",
-                    body: ["content": state.chapterContent]
-                )
-                await MainActor.run { state.isDirty = false }
-            } catch {
-                print("[Quill] applyToChapter save failed: \(error)")
-            }
-        }
+        // Persist immediately (user clicked a button, not waiting for autosave)
+        Task { await state.saveNow() }
     }
 }
 

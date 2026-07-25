@@ -166,6 +166,28 @@ struct CompilePreview: Codable {
 }
 
 // MARK: - App State
+
+/// Save state for the editor. Drives the status bar indicator and the
+/// autosave debounce. `.saved` is transient — it transitions back to
+/// `.idle` after a short delay so the UI can show "✓ saved" briefly.
+enum SaveState: Equatable {
+    case idle        // nothing pending
+    case dirty       // has unsaved changes
+    case saving      // save in flight
+    case saved       // just saved (transient)
+    case error(String)
+
+    var label: String {
+        switch self {
+        case .idle: return "saved"
+        case .dirty: return "unsaved"
+        case .saving: return "saving…"
+        case .saved: return "✓ saved"
+        case .error(let msg): return "save failed: \(msg)"
+        }
+    }
+}
+
 @MainActor
 class AppState: ObservableObject {
     @Published var projects: [Project] = []
@@ -173,7 +195,20 @@ class AppState: ObservableObject {
     @Published var chapters: [Chapter] = []
     @Published var currentChapter: Chapter?
     @Published var chapterContent: String = ""
-    @Published var isDirty: Bool = false
+
+    /// Save state for the editor. Tracks dirty/saving/saved transitions
+    /// so the UI can show "unsaved" / "saving..." / "saved" indicators,
+    /// and the autosave debounce can fire on transitions.
+    @Published var saveState: SaveState = .idle
+
+    /// Backward-compatible dirty flag (true when there's unsaved work or a
+    /// save is in flight). New code should branch on `saveState` instead.
+    var isDirty: Bool {
+        switch saveState {
+        case .dirty, .saving: return true
+        default: return false
+        }
+    }
 
     @Published var messages: [ChatMessage] = []
     @Published var isStreaming: Bool = false
@@ -189,6 +224,24 @@ class AppState: ObservableObject {
     private var projectsLoadTask: Task<Void, Never>?
     private var chaptersLoadTask: Task<Void, Never>?
     private var lastLoadedProjectId: String?
+    // Autosave debounce
+    private var autosaveTask: Task<Void, Never>?
+    private static let autosaveDelayNanos: UInt64 = 2_000_000_000  // 2s
+    private static let savedIndicatorNanos: UInt64 = 2_000_000_000  // how long "saved" stays visible
+
+    init() {
+        // Listen for Cmd+S from the menu bar — save the current chapter/scene
+        // from anywhere in the app.
+        NotificationCenter.default.addObserver(
+            forName: .saveDocument,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                await self?.saveNow()
+            }
+        }
+    }
 
     func loadProjects() async {
         projectsLoadTask?.cancel()
@@ -232,10 +285,17 @@ class AppState: ObservableObject {
             print("[Quill] selectProject: skipping (already loaded)")
             return
         }
+        // If we have unsaved work in the previous project, flush it first
+        if currentProject != nil, isDirty {
+            await saveNow()
+        }
         currentProject = project
         chapterContent = ""
         currentChapter = nil
-        isDirty = false
+        currentScene = nil
+        sceneContent = ""
+        autosaveTask?.cancel()
+        saveState = .idle
         wordCount = 0
         lastLoadedProjectId = project.id
         print("[Quill] selectProject: state reset, calling loadChapters")
@@ -290,7 +350,7 @@ class AppState: ObservableObject {
 
     func selectChapter(_ chapter: Chapter) async {
         if currentChapter != nil, isDirty {
-            await saveCurrentChapter()
+            await saveNow()
         }
         currentChapter = chapter
         await loadChapterContent(chapter)
@@ -303,25 +363,96 @@ class AppState: ObservableObject {
                 "/api/projects/\(project.id)/chapters/\(chapter.name)/content"
             )
             chapterContent = content.content
-            isDirty = false
+            autosaveTask?.cancel()
+            saveState = .idle
             updateWordCount()
         } catch {
             backendError = error.localizedDescription
         }
     }
 
-    func saveCurrentChapter() async {
-        guard let chapter = currentChapter, let project = currentProject else { return }
-        do {
-            try await BackendService.shared.put(
-                "/api/projects/\(project.id)/chapters/\(chapter.name)/content",
-                body: ["content": chapterContent]
-            )
-            isDirty = false
-            statusMessage = "Saved"
-        } catch {
-            backendError = error.localizedDescription
+    /// Mark content as dirty and schedule an autosave after a short delay.
+    /// Called by the editor's onChange when the user types.
+    func markDirty() {
+        // Don't downgrade saving → dirty
+        if case .saving = saveState { return }
+        saveState = .dirty
+        scheduleAutosave()
+    }
+
+    /// Schedule a debounced autosave. If a save is already scheduled, it
+    /// is cancelled and rescheduled — so quick typing batches into one save.
+    func scheduleAutosave() {
+        autosaveTask?.cancel()
+        autosaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: AppState.autosaveDelayNanos)
+            guard !Task.isCancelled else { return }
+            await self?.saveNow()
         }
+    }
+
+    /// Cancel any pending autosave without saving.
+    func cancelAutosave() {
+        autosaveTask?.cancel()
+        autosaveTask = nil
+    }
+
+    /// Save the current chapter (or scene) immediately. Updates saveState
+    /// throughout the save so the UI can show a saving/saved indicator.
+    func saveNow() async {
+        guard let chapter = currentChapter, let project = currentProject else { return }
+        autosaveTask?.cancel()
+        let previousState = saveState
+        // Capture the content we're about to save so we can detect later
+        // changes that happened during the save.
+        let contentToSave = currentScene != nil ? sceneContent : chapterContent
+        saveState = .saving
+        do {
+            if let scene = currentScene {
+                try await BackendService.shared.put(
+                    "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(scene.name)/content",
+                    body: ["content": contentToSave]
+                )
+            } else {
+                try await BackendService.shared.put(
+                    "/api/projects/\(project.id)/chapters/\(chapter.name)/content",
+                    body: ["content": contentToSave]
+                )
+            }
+            saveState = .saved
+            statusMessage = currentScene != nil ? "Scene saved" : "Saved"
+            // If the user typed during the save, the content will now differ
+            // from what we just persisted. Re-mark dirty so the next autosave
+            // picks up the new changes.
+            let currentContent = currentScene != nil ? sceneContent : chapterContent
+            if currentContent != contentToSave {
+                saveState = .dirty
+                scheduleAutosave()
+            } else {
+                // Fade "saved" → idle after a short delay
+                let snapshot = self
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: AppState.savedIndicatorNanos)
+                    if case .saved = snapshot.saveState {
+                        snapshot.saveState = .idle
+                    }
+                }
+            }
+        } catch {
+            saveState = .error(error.localizedDescription)
+            backendError = error.localizedDescription
+            // If we were dirty before, restore the dirty state and re-schedule
+            // an autosave so transient errors (e.g. backend restart) heal.
+            if case .dirty = previousState {
+                saveState = .dirty
+                scheduleAutosave()
+            }
+        }
+    }
+
+    /// Backward-compatible wrapper for callers that used the old name.
+    func saveCurrentChapter() async {
+        await saveNow()
     }
 
     func deleteChapter(_ chapter: Chapter) async {
@@ -363,12 +494,18 @@ class AppState: ObservableObject {
 
     func selectScene(_ scene: Scene) async {
         guard let project = currentProject, let chapter = currentChapter else { return }
+        // If we're switching scenes with unsaved work, save the old scene first
+        if currentScene != nil, isDirty {
+            await saveNow()
+        }
         do {
             let content: SceneContent = try await BackendService.shared.get(
                 "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(scene.name)/content"
             )
             currentScene = scene
             sceneContent = content.content
+            autosaveTask?.cancel()
+            saveState = .idle
         } catch {
             backendError = error.localizedDescription
         }
@@ -394,6 +531,23 @@ class AppState: ObservableObject {
                 "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes",
                 body: ["name": name]
             )
+            await loadScenes()
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    func deleteScene(_ scene: Scene) async {
+        guard let project = currentProject, let chapter = currentChapter else { return }
+        do {
+            try await BackendService.shared.delete(
+                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(scene.name)"
+            )
+            // If the deleted scene was the current one, clear it from the editor
+            if currentScene?.id == scene.id {
+                currentScene = nil
+                sceneContent = ""
+            }
             await loadScenes()
         } catch {
             backendError = error.localizedDescription

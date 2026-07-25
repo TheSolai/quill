@@ -200,6 +200,11 @@ struct SidebarView: View {
             .cornerRadius(4)
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button("Delete", role: .destructive) {
+                Task { await state.deleteScene(scene) }
+            }
+        }
         .padding(.horizontal, 6)
     }
 

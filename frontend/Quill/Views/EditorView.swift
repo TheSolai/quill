@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct EditorView: View {
     @ObservedObject var state: AppState
@@ -13,6 +14,9 @@ struct EditorView: View {
 
     @State private var showPreview: Bool = false
     @State private var previewMode: PreviewMode = .split
+    @State private var isFixingInline: Bool = false
+    @State private var inlineFixRange: NSRange? = nil
+    @State private var inlineFixStatus: String = ""  // shown as transient banner
     @FocusState private var editorFocused: Bool
     @ObservedObject private var slotRegistry = LLMSlotRegistry.shared
 
@@ -61,19 +65,33 @@ struct EditorView: View {
                     .controlSize(.small)
                 }
 
-                if state.isDirty {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(accent)
-                            .frame(width: 6, height: 6)
-                        Text("unsaved")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(accent)
-                    }
-                } else if state.currentChapter != nil {
-                    Text("saved")
-                        .font(.system(size: 10, design: .monospaced))
+                if state.currentChapter != nil {
+                    saveStateIndicator
+                }
+
+                // Manual save button (Cmd+S also works via menu bar)
+                if state.currentChapter != nil {
+                    Button(action: {
+                        Task { await state.saveNow() }
+                    }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "square.and.arrow.down")
+                                .font(.system(size: 9))
+                            Text("Save")
+                                .font(.system(size: 10, design: .monospaced))
+                        }
                         .foregroundColor(textMuted)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: 3)
+                                .stroke(border, lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("Save (⌘S) — autosaves every 2s; press to save now")
+                    // Disable when there's nothing to save or while saving
+                    .disabled(!state.isDirty)
                 }
             }
             .padding(.horizontal, 16)
@@ -114,30 +132,188 @@ struct EditorView: View {
     }
 
     private var markdownEditor: some View {
-        // Force a new TextEditor instance whenever the chapter changes.
-        // SwiftUI's TextEditor doesn't reliably re-render when the binding's
-        // source value changes externally, so we use .id() to remount it.
-        TextEditor(text: currentTextBinding)
-            .id(state.currentChapter?.id ?? "empty")
-            .font(.system(size: 14, design: .monospaced))
-            .foregroundColor(textPrimary)
-            .scrollContentBackground(.hidden)
-            .background(bgPrimary)
-            .padding(20)
-            .focused($editorFocused)
-            .onChange(of: activeContent) { _, newValue in
-                if state.currentChapter != nil {
-                    state.isDirty = true
-                    state.updateWordCount()
+        // Use MarkdownTextEditor (NSTextView wrapper) for Tab-to-fix inline AI.
+        // Tab triggers the edit-fix endpoint on the current selection or sentence.
+        MarkdownTextEditor(
+            text: currentTextBinding,
+            isFixing: isFixingInline,
+            onTabPressed: { snippet, range in
+                Task { await runInlineFix(snippet: snippet, range: range) }
+            },
+            font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
+            textColor: NSColor(textPrimary),
+            background: NSColor(bgPrimary)
+        )
+        .id("editor-\(state.currentChapter?.id ?? "empty")")
+        .padding(20)
+        .overlay(alignment: .topTrailing) {
+            if isFixingInline || !inlineFixStatus.isEmpty {
+                HStack(spacing: 5) {
+                    if isFixingInline {
+                        ProgressView().scaleEffect(0.5).frame(width: 10, height: 10)
+                    } else {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.green)
+                    }
+                    Text(inlineFixStatus)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(textSecondary)
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(bgSecondary.opacity(0.9))
+                .cornerRadius(4)
+                .padding(8)
+                .transition(.opacity)
             }
-            .onChange(of: state.currentChapter?.id) { _, _ in
-                editorFocused = true
-                print("[Quill] EditorView: chapter changed to \(state.currentChapter?.id ?? "nil"), activeContent length=\(activeContent.count)")
+        }
+        .onChange(of: activeContent) { _, newValue in
+            if state.currentChapter != nil {
+                state.markDirty()
+                state.updateWordCount()
             }
-            .onAppear {
-                print("[Quill] EditorView: appeared, currentChapter=\(state.currentChapter?.id ?? "nil"), activeContent length=\(activeContent.count)")
+        }
+        .onChange(of: state.currentChapter?.id) { _, _ in
+            editorFocused = true
+            // Clear any pending fix state when switching chapters
+            isFixingInline = false
+            inlineFixStatus = ""
+            inlineFixRange = nil
+            print("[Quill] EditorView: chapter changed to \(state.currentChapter?.id ?? "nil"), activeContent length=\(activeContent.count)")
+        }
+        .onAppear {
+            print("[Quill] EditorView: appeared, currentChapter=\(state.currentChapter?.id ?? "nil"), activeContent length=\(activeContent.count)")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .saveDocument)) { _ in
+            // Cmd+S from the menu bar
+            Task { await state.saveNow() }
+        }
+    }
+
+    // MARK: - Inline fix
+
+    /// Run /api/edit-fix on the given snippet, then replace the text at `range`
+    /// with the corrected version. Updates the chapter content binding, which
+    /// causes the NSTextView to re-render via updateNSView.
+    @MainActor
+    private func runInlineFix(snippet: String, range: NSRange) async {
+        guard !snippet.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        // Capture the current chapter/scene so we can detect a switch mid-fix
+        // and refuse to apply the result to the wrong place.
+        let chapterAtStart = state.currentChapter
+        let sceneAtStart = state.currentScene
+        let contentAtStart = activeContent
+
+        isFixingInline = true
+        inlineFixStatus = "Quill is fixing…"
+        let ns = (contentAtStart as NSString)
+        // Clamp range to current text bounds
+        let safeRange = NSRange(
+            location: min(range.location, ns.length),
+            length: min(range.length, max(0, ns.length - range.location))
+        )
+        do {
+            let result = try await BackendService.shared.editFix(
+                text: snippet,
+                instruction: "fix typos and grammar",
+                slotId: nil  // let the backend pick the best small local slot
+            )
+            // Bail if the user switched chapters/scenes while the API was in flight
+            guard state.currentChapter?.id == chapterAtStart?.id,
+                  state.currentScene?.id == sceneAtStart?.id else {
+                inlineFixStatus = "Fix discarded (chapter switched)"
+                isFixingInline = false
+                let status = inlineFixStatus
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    if inlineFixStatus == status { inlineFixStatus = "" }
+                }
+                return
             }
+            // Replace the range in the captured content
+            let mutable = NSMutableString(string: contentAtStart)
+            if safeRange.location + safeRange.length <= mutable.length {
+                mutable.replaceCharacters(in: safeRange, with: result.text)
+            }
+            let newContent = mutable as String
+            // Update the binding (this fires onChange → markDirty)
+            if state.currentScene != nil {
+                state.sceneContent = newContent
+            } else {
+                state.chapterContent = newContent
+            }
+            state.markDirty()
+            state.updateWordCount()
+            inlineFixRange = NSRange(location: safeRange.location, length: (result.text as NSString).length)
+            let original = snippet.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fixed = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            inlineFixStatus = original == fixed
+                ? "Quill found it already correct"
+                : "✓ Quill fixed it (⌘Z to undo)"
+            // Fade the status after 2.5s
+            let status = inlineFixStatus
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                if inlineFixStatus == status { inlineFixStatus = "" }
+            }
+        } catch {
+            inlineFixStatus = "✗ Fix failed: \(error.localizedDescription)"
+            // Fade error after 3s
+            let status = inlineFixStatus
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                if inlineFixStatus == status { inlineFixStatus = "" }
+            }
+        }
+        isFixingInline = false
+    }
+
+    // MARK: - Save state indicator
+
+    @ViewBuilder
+    private var saveStateIndicator: some View {
+        switch state.saveState {
+        case .idle:
+            EmptyView()
+        case .dirty:
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 6, height: 6)
+                Text("unsaved")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(accent)
+            }
+        case .saving:
+            HStack(spacing: 4) {
+                ProgressView()
+                    .scaleEffect(0.4)
+                    .frame(width: 8, height: 8)
+                Text("saving…")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(textSecondary)
+            }
+        case .saved:
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(.green)
+                Text("saved")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.green)
+            }
+        case .error(let msg):
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(.red)
+                Text(msg)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.red)
+                    .lineLimit(1)
+            }
+        }
     }
 
     @ViewBuilder

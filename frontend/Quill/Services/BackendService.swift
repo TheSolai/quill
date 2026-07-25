@@ -22,10 +22,19 @@ actor BackendService {
     private let baseURL = "http://127.0.0.1:5323"
     private let session: URLSession
 
+    // Timeouts for LLM-backed operations (long-form generation, multi-pass
+    // book writing, etc.) need to be much longer than 30s. Local Ollama can
+    // take 60-120s for big generations, especially on first load.
+    private static let requestTimeout: TimeInterval = 600  // 10 min
+    private static let resourceTimeout: TimeInterval = 1800  // 30 min
+
     private init() {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 300
+        config.timeoutIntervalForRequest = Self.requestTimeout
+        config.timeoutIntervalForResource = Self.resourceTimeout
+        // Don't retry — the backend has its own retry logic and the user
+        // should see a clear error if a request really fails.
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.session = URLSession(configuration: config)
     }
 
@@ -115,6 +124,59 @@ actor BackendService {
         if http.statusCode >= 400 {
             let msg = String(data: data, encoding: .utf8) ?? "Unknown error"
             throw BackendError.httpError(http.statusCode, msg)
+        }
+    }
+
+    struct EditFixResult: Decodable {
+        let text: String
+        let slotId: String?
+        let modelId: String?
+        let originalChars: Int?
+        let fixedChars: Int?
+        let instruction: String?
+
+        enum CodingKeys: String, CodingKey {
+            case text
+            case slotId = "slot_id"
+            case modelId = "model_id"
+            case originalChars = "original_chars"
+            case fixedChars = "fixed_chars"
+            case instruction
+        }
+    }
+
+    struct EditFixError: Decodable {
+        let error: String
+    }
+
+    /// Call the Zed-style /api/edit-fix endpoint. Returns the fixed text
+    /// (with whitespace already cleaned up by the backend).
+    func editFix(text: String, instruction: String = "fix typos and grammar", slotId: String? = nil) async throws -> EditFixResult {
+        var body: [String: Any] = [
+            "text": text,
+            "instruction": instruction,
+        ]
+        if let slotId = slotId { body["slot_id"] = slotId }
+        let req = try makeRequest(path: "/api/edit-fix", method: "POST", body: body)
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse else {
+            throw BackendError.networkError(NSError(domain: "", code: -1, userInfo: nil))
+        }
+        if http.statusCode == 400 {
+            // Try to extract the error message
+            if let err = try? JSONDecoder().decode(EditFixError.self, from: data) {
+                throw BackendError.httpError(400, err.error)
+            }
+            throw BackendError.httpError(400, String(data: data, encoding: .utf8) ?? "Bad request")
+        }
+        if http.statusCode >= 400 {
+            let msg = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw BackendError.httpError(http.statusCode, msg)
+        }
+        do {
+            return try JSONDecoder().decode(EditFixResult.self, from: data)
+        } catch {
+            throw BackendError.decodingError(error)
         }
     }
 

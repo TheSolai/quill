@@ -76,6 +76,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         fileMenu.addItem(NSMenuItem.separator())
 
+        let saveItem = NSMenuItem(title: "Save", action: #selector(saveDocument), keyEquivalent: "s")
+        saveItem.target = self
+        fileMenu.addItem(saveItem)
+
+        fileMenu.addItem(NSMenuItem.separator())
+
         let exportItem = NSMenuItem(title: "Export Book...", action: #selector(openExport), keyEquivalent: "e")
         exportItem.target = self
         fileMenu.addItem(exportItem)
@@ -159,6 +165,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             AppCommandsState.shared.showExport = true
         }
+    }
+
+    @objc func saveDocument() {
+        // Post a notification so the editor can save the current chapter.
+        // The EditorView / AppState handle the actual save logic.
+        NotificationCenter.default.post(name: .saveDocument, object: nil)
     }
 
     @objc func openNewProject() {

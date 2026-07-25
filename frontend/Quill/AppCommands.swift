@@ -12,4 +12,5 @@ final class AppCommandsState: ObservableObject {
 extension Notification.Name {
     static let toggleSidebar = Notification.Name("Quill.toggleSidebar")
     static let toggleAIPanel = Notification.Name("Quill.toggleAIPanel")
+    static let saveDocument = Notification.Name("Quill.saveDocument")
 }

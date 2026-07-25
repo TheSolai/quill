@@ -515,6 +515,150 @@ def chat_completion():
             return {"error": str(e)}, 500
 
 
+# ---- /api/edit-fix (Zed-style inline AI fixes) -----------------------------
+# Accepts a chunk of text + an instruction, returns the corrected version.
+# Used by the Swift editor's "Tab to fix" inline AI feature. Designed for
+# short, fast fixes via a small local model (e.g. gemma4:latest, llama3-groq-tool-use:8b).
+
+EDIT_FIX_SYSTEM = """You are Quill's inline editor. Your job is to fix ONLY what the
+user explicitly asked you to fix. Preserve everything else exactly: voice, style,
+diction, structure, formatting, markdown, and length.
+
+Rules:
+- If asked to "fix typos and grammar": correct spelling, punctuation, subject-verb
+  agreement, and obvious typos. Do NOT rewrite sentences or change word choice
+  unless it is clearly wrong.
+- If asked to "improve prose": tighten awkward phrasing, fix repeated words, and
+  smooth transitions. Do NOT change the meaning or voice.
+- If asked to "expand" or "elaborate": add 1-3 sentences of sensory detail,
+  character interiority, or atmospheric texture that fits the surrounding text.
+- If asked to "condense" or "shorten": tighten by removing redundancies, keeping
+  the most evocative phrases.
+- Always return the FULL corrected text (not just the changed part). Do not add
+  preamble, commentary, or explanation. Do not wrap in code fences. Do not add
+  "Here is the corrected text:". Just output the corrected text, raw."""
+
+
+@app.route("/api/edit-fix", methods=["POST"])
+def edit_fix():
+    """Zed-style inline AI fix.
+
+    Body:
+      text: the text to fix (required)
+      instruction: what to do (default: "fix typos and grammar")
+      slot_id: optional, defaults to a small fast slot
+      context: optional surrounding context (unused for now but reserved)
+
+    Response:
+      { text: corrected, slot_id, model_id, original_chars, fixed_chars }
+    """
+    data = safe_json()
+    text = data.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return {"error": "text is required and must be a non-empty string"}, 400
+    if len(text) > 20000:
+        return {"error": "text too long (max 20000 chars)"}, 400
+    instruction = data.get("instruction") or "fix typos and grammar"
+    if not isinstance(instruction, str) or len(instruction) > 500:
+        instruction = "fix typos and grammar"
+
+    # Pick a slot for inline fixes. Order of preference (most reliable first):
+    #   1. User-specified slot_id (if provided)
+    #   2. groq-tool-use (8B, follows instructions precisely)
+    #   3. Any local slot (gemma4, qwen3, mlx)
+    #   4. Active slot
+    #   5. First available
+    slot_id = data.get("slot_id")
+    if not slot_id:
+        all_slots = _slots.load_slots()
+        # Best: groq-tool-use — designed for tool/function calling, fast, follows
+        # instructions precisely even on short edits.
+        preferred = next(
+            (s for s in all_slots if s.type in ("ollama", "mlx") and
+             "groq-tool-use" in s.model_id.lower()),
+            None,
+        )
+        if not preferred:
+            # Then any local model
+            preferred = next(
+                (s for s in all_slots if s.type in ("ollama", "mlx")),
+                None,
+            )
+        if not preferred:
+            # Fall back to the active slot (could be cloud)
+            active = _slots.get_active_slot()
+            preferred = active
+        if not preferred and all_slots:
+            preferred = all_slots[0]
+        slot_id = preferred.id if preferred else None
+    slot = _slots.get_slot(slot_id) if slot_id else None
+    if not slot:
+        return {"error": "no slot available for edit-fix"}, 503
+
+    # Use low temperature for deterministic fixes. num_predict scales with input
+    # so the model has room for the entire output even on long paragraphs.
+    num_predict = min(4000, max(512, int(len(text) * 2.0)))
+
+    system_msg = {"role": "system", "content": EDIT_FIX_SYSTEM}
+    user_msg = {
+        "role": "user",
+        "content": f"{instruction}\n\n---\n\n{text}",
+    }
+
+    try:
+        provider = _slot_providers.get_provider(slot)
+    except Exception as e:
+        return {"error": f"provider init failed: {e}"}, 500
+
+    try:
+        fixed = provider.chat(
+            [system_msg, user_msg],
+            temperature=0.2,
+            max_tokens=num_predict,
+            top_p=0.9,
+        )
+    except Exception as e:
+        return {"error": f"edit-fix failed: {e}"}, 500
+
+    # Clean up: strip code fences, leading/trailing whitespace, common preambles
+    fixed = _strip_edit_fix_wrapper(fixed)
+
+    return {
+        "text": fixed,
+        "slot_id": slot.id,
+        "model_id": slot.model_id,
+        "original_chars": len(text),
+        "fixed_chars": len(fixed),
+        "instruction": instruction,
+    }
+
+
+def _strip_edit_fix_wrapper(text: str) -> str:
+    """Remove common LLM wrappers from edit-fix output: code fences, preambles."""
+    s = text.strip()
+    # Strip ```markdown / ``` blocks
+    if s.startswith("```"):
+        # Drop first line (```markdown or similar) and trailing ```
+        lines = s.split("\n")
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        s = "\n".join(lines).strip()
+    # Strip common preambles
+    for prefix in [
+        "Here is the corrected text:",
+        "Here is the corrected version:",
+        "Corrected text:",
+        "Fixed text:",
+        "Here you go:",
+    ]:
+        if s.lower().startswith(prefix.lower()):
+            s = s[len(prefix):].lstrip("\n").lstrip()
+            break
+    return s
+
+
 def _dross_system_prompt() -> str:
     """The default Quill system prompt with tool-use instructions.
 

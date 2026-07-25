@@ -701,3 +701,138 @@ class TestQuillRename:
         from book_writer import CHAPTER_SYSTEM
         assert "Quill" in CHAPTER_SYSTEM
         assert "Dross" not in CHAPTER_SYSTEM
+
+
+# --------------------------------------------------------------------------
+# Edit-fix endpoint (Zed-style inline AI)
+# --------------------------------------------------------------------------
+
+class TestEditFix:
+    """Tests for /api/edit-fix — the inline AI fix endpoint used by the
+    Swift editor's "Tab to fix" feature. Backed by a small fast slot
+    (gemma4:latest, llama3-groq-tool-use:8b, etc.)."""
+
+    def test_endpoint_exists(self, client):
+        r = client.post("/api/edit-fix", json={"text": "hello wrold"})
+        # Either 200 (with text) or 5xx (no slot) — never 404
+        assert r.status_code != 404
+
+    def test_requires_text_field(self, client):
+        r = client.post("/api/edit-fix", json={})
+        assert r.status_code == 400
+        d = r.get_json()
+        assert "text" in d.get("error", "")
+
+    def test_rejects_empty_text(self, client):
+        r = client.post("/api/edit-fix", json={"text": ""})
+        assert r.status_code == 400
+        r = client.post("/api/edit-fix", json={"text": "   "})
+        assert r.status_code == 400
+
+    def test_rejects_non_string_text(self, client):
+        r = client.post("/api/edit-fix", json={"text": 12345})
+        assert r.status_code == 400
+        r = client.post("/api/edit-fix", json={"text": None})
+        assert r.status_code == 400
+        r = client.post("/api/edit-fix", json={"text": ["list", "of", "words"]})
+        assert r.status_code == 400
+
+    def test_rejects_text_too_long(self, client):
+        big_text = "a" * 20001
+        r = client.post("/api/edit-fix", json={"text": big_text})
+        assert r.status_code == 400
+        d = r.get_json()
+        assert "too long" in d.get("error", "").lower() or "max" in d.get("error", "").lower()
+
+    def test_default_instruction(self, client):
+        """When no instruction is provided, the default 'fix typos and grammar' is used."""
+        from unittest.mock import patch, MagicMock
+        from slot_providers import PROVIDERS
+        # Activate an ollama slot so the edit-fix endpoint routes to our mock
+        client.post("/api/slots/gemma4-fast/activate")
+        mock_inst = MagicMock()
+        mock_inst.chat.return_value = "fixed text"
+        with patch.dict(PROVIDERS, {"ollama": MagicMock(return_value=mock_inst)}):
+            r = client.post("/api/edit-fix", json={"text": "helo wrold"})
+            assert r.status_code == 200, r.get_data(as_text=True)
+            mock_inst.chat.assert_called_once()
+            msgs = mock_inst.chat.call_args[0][0]
+            system_msg = msgs[0]
+            assert "typos" in system_msg["content"].lower() or \
+                   "grammar" in system_msg["content"].lower()
+            user_msg = msgs[1]
+            assert "fix typos" in user_msg["content"].lower()
+
+    def test_custom_instruction(self, client):
+        from unittest.mock import patch, MagicMock
+        from slot_providers import PROVIDERS
+        client.post("/api/slots/gemma4-fast/activate")
+        mock_inst = MagicMock()
+        mock_inst.chat.return_value = "expanded"
+        with patch.dict(PROVIDERS, {"ollama": MagicMock(return_value=mock_inst)}):
+            r = client.post("/api/edit-fix", json={
+                "text": "short",
+                "instruction": "expand with sensory detail",
+            })
+            assert r.status_code == 200
+            msgs = mock_inst.chat.call_args[0][0]
+            assert "expand with sensory detail" in msgs[1]["content"]
+
+    def test_strips_code_fence_wrapper(self):
+        """_strip_edit_fix_wrapper should remove ```markdown blocks and preambles."""
+        from server import _strip_edit_fix_wrapper
+        assert _strip_edit_fix_wrapper("```markdown\nfixed text\n```") == "fixed text"
+        assert _strip_edit_fix_wrapper("```\nfixed text\n```") == "fixed text"
+        assert _strip_edit_fix_wrapper("Here is the corrected text:\n\nfixed text") == "fixed text"
+        assert _strip_edit_fix_wrapper("Corrected text: fixed text") == "fixed text"
+        assert _strip_edit_fix_wrapper("  just text  ") == "just text"
+        assert _strip_edit_fix_wrapper("no wrapper here") == "no wrapper here"
+
+    def test_response_shape(self, client):
+        """Successful response has text, slot_id, model_id, original_chars, fixed_chars."""
+        from unittest.mock import patch, MagicMock
+        from slot_providers import PROVIDERS
+        client.post("/api/slots/gemma4-fast/activate")
+        mock_inst = MagicMock()
+        mock_inst.chat.return_value = "fixed version"
+        with patch.dict(PROVIDERS, {"ollama": MagicMock(return_value=mock_inst)}):
+            r = client.post("/api/edit-fix", json={"text": "original text"})
+            assert r.status_code == 200
+            d = r.get_json()
+            assert "text" in d
+            assert "slot_id" in d
+            assert "model_id" in d
+            assert d["original_chars"] == len("original text")
+            assert d["fixed_chars"] == len("fixed version")
+            assert d["instruction"] == "fix typos and grammar"
+
+    def test_low_temperature_for_determinism(self, client):
+        """edit-fix should use low temperature for deterministic fixes."""
+        from unittest.mock import patch, MagicMock
+        from slot_providers import PROVIDERS
+        client.post("/api/slots/gemma4-fast/activate")
+        mock_inst = MagicMock()
+        mock_inst.chat.return_value = "x"
+        with patch.dict(PROVIDERS, {"ollama": MagicMock(return_value=mock_inst)}):
+            r = client.post("/api/edit-fix", json={"text": "hi"})
+            assert r.status_code == 200
+            call_kwargs = mock_inst.chat.call_args[1]
+            assert call_kwargs.get("temperature", 1.0) <= 0.3
+            assert call_kwargs.get("max_tokens", 0) >= 256
+
+    def test_instruction_truncation(self, client):
+        """Overly long instructions fall back to the default."""
+        from unittest.mock import patch, MagicMock
+        from slot_providers import PROVIDERS
+        client.post("/api/slots/gemma4-fast/activate")
+        mock_inst = MagicMock()
+        mock_inst.chat.return_value = "x"
+        with patch.dict(PROVIDERS, {"ollama": MagicMock(return_value=mock_inst)}):
+            r = client.post("/api/edit-fix", json={
+                "text": "hi",
+                "instruction": "x" * 600,  # > 500 char limit
+            })
+            assert r.status_code == 200
+            d = r.get_json()
+            # Should have used the default instruction
+            assert d["instruction"] == "fix typos and grammar"
