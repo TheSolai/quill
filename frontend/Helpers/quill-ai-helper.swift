@@ -58,7 +58,7 @@ func main() async -> Int32 {
     }
 
     // Pass-through: unknown subcommand → shell
-    let known = ["status", "ask", "chat", "fix", "expand", "condense", "slots", "projects", "chapters", "scenes", "search", "email", "mcp", "skills", "claude", "openclaw", "clawhub", "help"]
+    let known = ["status", "ask", "chat", "fix", "expand", "condense", "slots", "projects", "chapters", "scenes", "search", "email", "mcp", "skills", "claude", "codex", "openclaw", "clawhub", "setup", "help"]
     if !known.contains(cmd) {
         return runShellPassThrough(args)
     }
@@ -81,8 +81,10 @@ func main() async -> Int32 {
         case "mcp":       try await cmdMcp(subArgs)
         case "skills":    try await cmdSkills(subArgs)
         case "claude":    try await cmdClaude(subArgs)
+        case "codex":     try await cmdCodex(subArgs)
         case "openclaw":  try await cmdOpenclaw(subArgs)
         case "clawhub":   try await cmdClawhub(subArgs)
+        case "setup":     try await cmdSetup(subArgs)
         case "help":      printUsage()
         default: break
         }
@@ -131,8 +133,10 @@ func printUsage() {
       mcp serve                    Start MCP server (stdio JSON-RPC)
       skills [list|show NAME]      List/show OpenClaw skills
       claude "PROMPT"              Run Claude Code (Anthropic CLI)
+      codex "PROMPT"               Run OpenAI Codex CLI
       openclaw "PROMPT"            Run OpenClaw agent
       clawhub [search|install]     Manage OpenClaw skills
+      setup                        Show status of all CLI tools + how to fix issues
 
     Any other command is passed to /bin/sh -c, so you can run:
       quill ls
@@ -604,6 +608,67 @@ func cmdClawhub(_ args: [String]) async throws {
     }
 }
 
+func cmdCodex(_ args: [String]) async throws {
+    // quill codex "<prompt>" — runs OpenAI Codex non-interactively
+    let prompt = args.joined(separator: " ")
+    guard !prompt.isEmpty else {
+        printError("codex: prompt required")
+        print("usage: quill codex \"<prompt>\"")
+        exit(1)
+    }
+    let r = try await httpPost("/api/tools/call", body: [
+        "name": "codex",
+        "args": ["prompt": prompt],
+    ]) as? [String: Any] ?? [:]
+    if let out = r["stdout"] as? String, !out.isEmpty {
+        print(out)
+    }
+    if let err = r["stderr"] as? String, !err.isEmpty {
+        FileHandle.standardError.write(Data("stderr: \(err)\n".utf8))
+    }
+    if let err = r["error"] as? String {
+        printError(err)
+    }
+}
+
+func cmdSetup(_ args: [String]) async throws {
+    // quill setup — show status of all CLI tools and how to fix any issues
+    let r = try await httpPost("/api/tools/call", body: [
+        "name": "cli_status",
+        "args": [:],
+    ]) as? [String: Any] ?? [:]
+    print("Quill CLI setup — installed tools and their status:")
+    print("")
+    // Sort: installed first, then by name
+    let sortedKeys = r.keys.sorted()
+    for key in sortedKeys {
+        guard let info = r[key] as? [String: Any] else { continue }
+        let installed = info["installed"] as? Bool ?? false
+        let mark = installed ? "✓" : "✗"
+        let version = info["version"] as? String ?? ""
+        print("  \(mark) \(key.padding(toLength: 12, withPad: " ", startingAt: 0)) \(version)")
+        if let logged = info["logged_in"] as? Bool {
+            if logged {
+                print("    logged in: yes")
+            } else {
+                print("    logged in: NO")
+            }
+        }
+        if let msg = info["message"] as? String, !msg.isEmpty {
+            print("    → \(msg)")
+        }
+        if let status = info["login_status"] as? String, !status.isEmpty {
+            print("    status: \(status)")
+        }
+    }
+    print("")
+    print("Quick fixes:")
+    print("  • claude not logged in? Run `claude /login` in a terminal, or set ANTHROPIC_API_KEY.")
+    print("  • codex token expired? Run `codex login` to re-auth.")
+    print("  • openclaw needs session? Run `openclaw agents list` to see available agents.")
+    print("  • gemini broken? Google's free tier shut down — migrate to https://antigravity.google")
+}
+
 // MARK: - REPL
 
 func runREPL() async {
@@ -628,8 +693,10 @@ func runREPL() async {
             case "mcp":       try await cmdMcp(Array(parts.dropFirst()))
             case "skills":    try await cmdSkills(Array(parts.dropFirst()))
             case "claude":    try await cmdClaude(Array(parts.dropFirst()))
+            case "codex":     try await cmdCodex(Array(parts.dropFirst()))
             case "openclaw":  try await cmdOpenclaw(Array(parts.dropFirst()))
             case "clawhub":   try await cmdClawhub(Array(parts.dropFirst()))
+            case "setup":     try await cmdSetup(Array(parts.dropFirst()))
             case "fix":       try await cmdFix(Array(parts.dropFirst()), instruction: "fix typos and grammar")
             case "expand":    try await cmdFix(Array(parts.dropFirst()), instruction: "expand with sensory detail")
             case "condense":  try await cmdFix(Array(parts.dropFirst()), instruction: "condense and tighten")

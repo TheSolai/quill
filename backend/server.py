@@ -801,8 +801,10 @@ Tools:
 - list_files: list files in a directory. args: {path?}
 - read_file: read a text file. args: {path}
 - claude: run Claude Code (Anthropic CLI) for coding tasks. args: {prompt, cwd?, timeout?}
+- codex: run OpenAI Codex CLI for coding tasks. args: {prompt, cwd?, timeout?}
 - openclaw: run the OpenClaw agent CLI for autonomous multi-step tasks. args: {prompt, timeout?}
 - clawhub: manage OpenClaw skills (search marketplace, install, whoami). args: {action, query?, name?}
+- cli_status: check which CLI tools are installed and their auth state. Use to diagnose 'which CLIs can I use right now?'. args: {}
 
 Working style: dry, direct, no fluff. You collaborate with the user (who is
 also named Quill — the human writer). You never refuse a reasonable request
@@ -2467,6 +2469,27 @@ MCP_TOOLS = [
             "required": ["action"],
         },
     },
+    {
+        "name": "codex",
+        "description": "Run OpenAI Codex CLI for coding tasks",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "cwd": {"type": "string"},
+                "timeout": {"type": "integer"},
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "cli_status",
+        "description": "Check which CLI tools are installed and their auth state",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 
@@ -2583,10 +2606,14 @@ def _mcp_call_tool(name, args):
         }
     if name == "claude":
         return _dross_tools.call_tool("claude", args)
+    if name == "codex":
+        return _dross_tools.call_tool("codex", args)
     if name == "openclaw":
         return _dross_tools.call_tool("openclaw", args)
     if name == "clawhub":
         return _dross_tools.call_tool("clawhub", args)
+    if name == "cli_status":
+        return _dross_tools.call_tool("cli_status", args)
     return {"error": f"unknown tool: {name}"}
 
 

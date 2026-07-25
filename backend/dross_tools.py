@@ -295,6 +295,88 @@ def tool_clawhub(args: dict) -> dict:
     return {"error": f"unknown action: {action!r}"}
 
 
+def tool_codex(args: dict) -> dict:
+    """Run OpenAI Codex CLI for coding tasks. Use for code review, debugging,
+    refactoring, explaining code. Requires `codex login` first.
+
+    Args:
+        prompt: the prompt for Codex
+        cwd: working directory (defaults to current)
+        timeout: max seconds (default 120, max 600)
+    """
+    prompt = args.get("prompt", "").strip()
+    if not prompt:
+        return {"error": "prompt required"}
+    cwd = args.get("cwd") or str(Path.home())
+    timeout = min(int(args.get("timeout", 120)), 600)
+    return _run_cli(
+        "codex",
+        ["exec", "--skip-git-repo-check", prompt],
+        timeout=timeout,
+    )
+
+
+def tool_cli_status(_args: dict) -> dict:
+    """Check which CLI tools are installed and their auth state.
+
+    Returns a dict of tool -> {installed: bool, version, auth_status, message}.
+    Use this to diagnose 'which CLIs can I use right now?'.
+    """
+    import shutil
+    import subprocess
+    tools = {
+        "quill": shutil.which("quill"),
+        "claude": shutil.which("claude"),
+        "codex": shutil.which("codex"),
+        "opencode": shutil.which("opencode"),
+        "openclaw": shutil.which("openclaw"),
+        "clawhub": shutil.which("clawhub"),
+        "gemini": shutil.which("gemini"),
+    }
+    out = {}
+    for name, path in tools.items():
+        info: dict = {"installed": path is not None, "path": path}
+        if not path:
+            out[name] = info
+            continue
+        # Get version
+        try:
+            r = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=5)
+            ver = (r.stdout or r.stderr).strip().split("\n")[0][:80]
+            info["version"] = ver
+        except Exception:
+            info["version"] = "unknown"
+        # Auth state
+        if name == "claude":
+            try:
+                r = subprocess.run([path, "auth", "status"], capture_output=True, text=True, timeout=5)
+                j = json.loads(r.stdout)
+                info["logged_in"] = j.get("loggedIn", False)
+                info["auth_method"] = j.get("authMethod", "none")
+                if not j.get("loggedIn"):
+                    info["message"] = "Run `claude /login` to authenticate, or set ANTHROPIC_API_KEY env var."
+                else:
+                    info["message"] = "Ready."
+            except Exception:
+                info["logged_in"] = False
+        elif name == "codex":
+            try:
+                r = subprocess.run([path, "login", "status"], capture_output=True, text=True, timeout=5)
+                info["login_status"] = (r.stdout or r.stderr).strip()[:120]
+            except Exception:
+                pass
+        elif name == "openclaw":
+            try:
+                r = subprocess.run([path, "agents", "list"], capture_output=True, text=True, timeout=5)
+                info["message"] = "Run `openclaw agents list` to see available agents."
+            except Exception:
+                pass
+        elif name == "gemini":
+            info["message"] = "Google's free tier shut down Gemini Code Assist. Migrate to https://antigravity.google"
+        out[name] = info
+    return out
+
+
 # --------------------------------------------------------------------------
 # Tool registry
 # --------------------------------------------------------------------------
@@ -431,6 +513,27 @@ TOOL_REGISTRY: dict[str, dict] = {
             "required": ["action"],
         },
         "handler": tool_clawhub,
+    },
+    "codex": {
+        "description": "Run OpenAI Codex CLI for coding tasks. Use for code review, debugging, refactoring. Requires `codex login` first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Prompt for Codex"},
+                "cwd": {"type": "string", "description": "Working directory (default: home)"},
+                "timeout": {"type": "integer", "description": "Max seconds (default 120, max 600)"},
+            },
+            "required": ["prompt"],
+        },
+        "handler": tool_codex,
+    },
+    "cli_status": {
+        "description": "Check which CLI tools are installed and their auth state. Use this to diagnose 'which CLIs can I use right now?'",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+        "handler": tool_cli_status,
     },
 }
 

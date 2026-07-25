@@ -1625,3 +1625,75 @@ class TestSkillsAutoDiscovery:
         # These priority skills should appear
         for priority_skill in ["summarize", "tmux", "bash", "shell-scripting", "sqlite"]:
             assert f"`{priority_skill}`" in prompt, f"{priority_skill} not in priority list"
+
+
+# --------------------------------------------------------------------------
+# CLI tool status and Codex integration
+# --------------------------------------------------------------------------
+
+class TestCLITools:
+    """Tests for cli_status, codex, and the unified setup diagnostic."""
+
+    def test_cli_status_returns_all_tools(self):
+        from dross_tools import tool_cli_status
+        r = tool_cli_status({})
+        # Should have entries for all the major tools
+        for name in ("quill", "claude", "codex", "openclaw", "clawhub", "gemini"):
+            assert name in r, f"missing {name} in cli_status: {list(r.keys())}"
+        # Each should have 'installed' bool
+        for name, info in r.items():
+            assert "installed" in info, f"{name} missing 'installed' field"
+            assert "version" in info or not info["installed"], f"{name} missing 'version'"
+
+    def test_cli_status_message_for_gemini(self):
+        """Gemini should have a clear 'free tier shut down' message."""
+        from dross_tools import tool_cli_status
+        r = tool_cli_status({})
+        if r.get("gemini", {}).get("installed"):
+            msg = r["gemini"].get("message", "")
+            assert "antigravity" in msg.lower() or "free tier" in msg.lower(), \
+                f"gemini message doesn't explain: {msg}"
+
+    def test_codex_requires_prompt(self):
+        from dross_tools import tool_codex
+        r = tool_codex({})
+        assert "error" in r
+        assert "prompt" in r["error"]
+
+    def test_codex_safety_blocks_dangerous(self):
+        from dross_tools import tool_codex
+        r = tool_codex({"prompt": "rm -rf /"})
+        assert "error" in r
+        assert "blocked" in r["error"].lower()
+
+    def test_codex_calls_binary_if_available(self):
+        """If codex is installed, this should run; if not, return not-found."""
+        import shutil
+        from dross_tools import tool_codex
+        if not shutil.which("codex"):
+            r = tool_codex({"prompt": "test", "timeout": 15})
+            assert "not found" in r.get("error", "").lower()
+        else:
+            r = tool_codex({"prompt": "test", "timeout": 15})
+            assert "stdout" in r or "error" in r
+
+    def test_mcp_exposes_codex_and_cli_status(self, client):
+        r = client.post("/api/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}
+        })
+        tools = {t["name"] for t in r.get_json()["result"]["tools"]}
+        assert "codex" in tools
+        assert "cli_status" in tools
+
+    def test_mcp_cli_status_works(self, client):
+        r = client.post("/api/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "cli_status", "arguments": {}}
+        })
+        result = r.get_json()["result"]
+        text = result["content"][0]["text"]
+        import json as _json
+        data = _json.loads(text)
+        # Should have quill, claude, codex, etc.
+        assert "quill" in data
+        assert "gemini" in data
