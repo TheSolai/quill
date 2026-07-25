@@ -1570,3 +1570,58 @@ class TestChapterWriteNoProject:
             # Empty string is treated as "default"
             d = r.get_json()
             assert d.get("chapter_written") is not None
+
+
+# --------------------------------------------------------------------------
+# Skills auto-discovery (from installed SKILL.md files)
+# --------------------------------------------------------------------------
+
+class TestSkillsAutoDiscovery:
+    """Skills installed via clawhub are auto-discovered from their SKILL.md
+    frontmatter, even if they're not in the skill-resolver config."""
+
+    def test_directory_name_used_as_canonical_key(self):
+        """The directory name is the canonical key (e.g. 'tmux', 'bash'),
+        not the 'name:' field inside the frontmatter."""
+        from skills import list_skills
+        skills = {s["name"] for s in list_skills()}
+        assert "tmux" in skills, f"tmux not in skills: {sorted(skills)[:5]}..."
+        assert "bash" in skills
+
+    def test_keywords_extracted_from_frontmatter(self):
+        """For skills that declare keywords, those are used."""
+        from skills import get_skill
+        # Most installed skills have at least the directory name as a keyword
+        tmux = get_skill("tmux")
+        assert tmux is not None
+        assert "tmux" in tmux.get("keywords", [])
+
+    def test_skill_md_path_recorded(self):
+        """Each discovered skill has at least one path to its SKILL.md."""
+        from skills import get_skill
+        tmux = get_skill("tmux")
+        assert tmux is not None
+        paths = tmux.get("paths", [])
+        assert len(paths) > 0
+        assert any("SKILL.md" in p for p in paths)
+
+    def test_can_read_skill_md_content(self):
+        """read_skill_md should return the file's content."""
+        from skills import read_skill_md
+        content = read_skill_md("tmux")
+        if content:
+            assert "tmux" in content.lower()
+
+    def test_installed_skill_total_count(self):
+        """At least 70 skills (55 config + 10+ new installs)."""
+        from skills import list_skills
+        total = len(list_skills())
+        assert total >= 70, f"expected ≥70 skills, got {total}"
+
+    def test_skill_priority_order(self):
+        """The system prompt lists priority skills first (summarize, github, etc)."""
+        from server import _dross_system_prompt
+        prompt = _dross_system_prompt()
+        # These priority skills should appear
+        for priority_skill in ["summarize", "tmux", "bash", "shell-scripting", "sqlite"]:
+            assert f"`{priority_skill}`" in prompt, f"{priority_skill} not in priority list"

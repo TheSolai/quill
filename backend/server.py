@@ -812,7 +812,7 @@ When you receive a tool result, incorporate it naturally into your reply.
 Do not output raw JSON tool calls in your final visible response — use the
 tools to gather information, then answer in prose."""
     # Inject OpenClaw skills so the AI knows what's installed
-    skills_block = _skills.skills_for_prompt(max_skills=30)
+    skills_block = _skills.skills_for_prompt(max_skills=45)
     if skills_block:
         return base + "\n\n---\n\n" + skills_block
     return base

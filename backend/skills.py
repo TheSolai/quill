@@ -95,27 +95,166 @@ _CACHE: Optional[dict] = None
 
 
 def _load_registry() -> dict:
-    """Load the OpenClaw skills registry. Cached on first load."""
+    """Load the OpenClaw skills registry. Cached on first load.
+
+    Sources, in priority order:
+      1. The skill-resolver config (declares skills with keywords)
+      2. Auto-discovery: any skill directory with a SKILL.md that has a
+         `metadata.openclaw.keywords` field — these get auto-registered
+         even if they're not in the config yet.
+
+    This means installing a new skill via clawhub immediately makes it
+    available to the AI without needing to update the config manually.
+    """
     global _CACHE
     if _CACHE is not None:
         return _CACHE
     config_path = _find_skills_config()
-    if not config_path:
-        _CACHE = {"_config_path": None, "_skill_dir": None, "skills": {}}
-        return _CACHE
-    try:
-        with open(config_path) as f:
-            data = json.load(f)
-    except Exception:
-        _CACHE = {"_config_path": None, "_skill_dir": None, "skills": {}}
-        return _CACHE
+    config_skills: dict = {}
+    if config_path:
+        try:
+            with open(config_path) as f:
+                data = json.load(f)
+            config_skills = data.get("skills", {})
+        except Exception:
+            pass
+
+    # Auto-discover skills from all known directories: look for SKILL.md
+    # files with `metadata.openclaw.keywords` and register them.
+    # Use the directory name as the canonical key (what users see in
+    # `clawhub install <name>` and `quill skills show <name>`).
+    discovered: dict = {}
+    for skill_dir in _find_all_skill_dirs():
+        if not skill_dir.is_dir():
+            continue
+        for entry in skill_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            # Skip non-skill dirs (index.html, schemas.json, skill-resolver, etc.)
+            if not entry.name.replace("-", "").replace("_", "").isalnum():
+                continue
+            skill_md = entry / "SKILL.md"
+            if not skill_md.exists():
+                continue
+            keywords, slug, name, emoji = _parse_skill_frontmatter(skill_md)
+            if not keywords:
+                keywords = [entry.name]
+            key = entry.name  # canonical: directory name
+            # Only add if not already in the config
+            if key in config_skills:
+                continue
+            discovered[key] = {
+                "keywords": keywords,
+                "slug": slug or name or entry.name,
+                "paths": [str(skill_md)],
+            }
+
     skill_dir = _find_skill_dir()
+    all_skills = {**discovered, **config_skills}  # config wins on duplicates
     _CACHE = {
-        "_config_path": str(config_path),
+        "_config_path": str(config_path) if config_path else None,
         "_skill_dir": str(skill_dir) if skill_dir else None,
-        "skills": data.get("skills", {}),
+        "skills": all_skills,
     }
     return _CACHE
+
+
+def _parse_skill_frontmatter(path: Path) -> tuple[list, str, str, str]:
+    """Parse the YAML-ish frontmatter at the top of a SKILL.md.
+
+    Returns (keywords, slug, name, emoji). Handles multiple formats:
+      - openclaw format:
+          metadata: {"openclaw": {"keywords": [...]}}
+      - clawdbot format:
+          metadata: {"clawdbot": {"emoji": "🧾", ...}}
+      - YAML-formatted metadata:
+          metadata:
+            openclaw:
+              keywords: [summarize, summary]
+
+    Falls back to extracting keywords from the description if not
+    explicitly declared.
+    """
+    try:
+        content = path.read_text(encoding="utf-8")
+    except Exception:
+        return [], "", "", ""
+    # Quick frontmatter parse
+    if not content.startswith("---"):
+        return _keywords_from_description(content, path), "", "", ""
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return _keywords_from_description(content, path), "", "", ""
+    front = parts[1]
+    body = parts[2]
+    # Extract name
+    name = ""
+    for line in front.splitlines():
+        if line.strip().startswith("name:"):
+            name = line.split(":", 1)[1].strip().strip('"').strip("'")
+            break
+
+    import re
+    keywords: list = []
+    # Find keywords in any of: openclaw, clawdbot, or top-level metadata
+    # Pattern 1: "openclaw"/"clawdbot": {...keywords: [...]...}
+    for source in ('"openclaw"', '"clawdbot"'):
+        m = re.search(source + r'\s*:\s*\{', body, re.DOTALL)
+        if m:
+            # Find keywords array within the block
+            start = body.find('[', m.end())
+            if start != -1:
+                depth = 1
+                j = start + 1
+                while j < len(body) and depth > 0:
+                    if body[j] == '[': depth += 1
+                    elif body[j] == ']': depth -= 1
+                    j += 1
+                keywords_str = body[start+1:j-1]
+                for kw in re.findall(r'"([^"]+)"', keywords_str):
+                    keywords.append(kw)
+            break
+
+    # Pattern 2: YAML format keywords: [a, b, c]
+    if not keywords:
+        m = re.search(r'^\s*keywords:\s*\[([^\]]+)\]', body, re.MULTILINE)
+        if m:
+            for kw in re.findall(r'\b(\w[\w-]*)', m.group(1)):
+                keywords.append(kw)
+
+    # Fallback: extract keywords from the description
+    if not keywords:
+        keywords = _keywords_from_description(body, path)
+
+    return keywords, "", name, ""
+
+
+def _keywords_from_description(text: str, path: Path) -> list:
+    """Extract trigger keywords from the description when none are declared.
+
+    Strategy: take the skill name and the first 1-2 nouns from the
+    description. This gives us usable triggers for skills that don't
+    declare keywords explicitly (most clawdbot-format skills).
+    """
+    keywords = [path.parent.name]
+    # Try to get description
+    import re
+    desc_match = re.search(r"^description:\s*['\"]?(.*?)(?:['\"]?\s*$|---)", text, re.MULTILINE | re.DOTALL)
+    if desc_match:
+        desc = desc_match.group(1).strip()
+        # Extract the first 2 key nouns (capitalized words, or quoted terms)
+        # Simple heuristic: split on common stopwords, take the first 2-3 nouns
+        words = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]+)?\b', desc)
+        for w in words[:2]:
+            if w.lower() not in (k.lower() for k in keywords):
+                keywords.append(w.lower())
+        # Also add the first verb-like phrase
+        first_action = re.search(r'\b(write|debug|read|edit|run|find|search|test|check|analyze|create|generate|format|lint|review|explain|fix|harden|monitor|manage|summarize)\b', desc, re.IGNORECASE)
+        if first_action:
+            kw = first_action.group(1).lower()
+            if kw not in (k.lower() for k in keywords):
+                keywords.append(kw)
+    return keywords[:6]
 
 
 def reload() -> dict:
@@ -170,7 +309,7 @@ def find_skill_by_keyword(text: str) -> Optional[dict]:
     return best if best_score > 0 else None
 
 
-def skills_for_prompt(max_skills: int = 25) -> str:
+def skills_for_prompt(max_skills: int = 45) -> str:
     """Build a compact skills list for injection into the AI's system prompt.
 
     Lists the most useful skills (up to max_skills) with their keywords so
@@ -190,9 +329,14 @@ def skills_for_prompt(max_skills: int = 25) -> str:
         "blog-reflections", "devto-tutorials", "devto-trending",
         "skill-creator", "prompt-master", "token-optimizer", "model-usage",
         "image-generate", "video-generate", "music-generate",
-        "diagram-maker", "theme-factory",
+        "diagram", "mermaid-diagram", "diagram-maker", "theme-factory",
         "apple-notes", "apple-reminders", "things-mac", "obsidian",
         "tmux", "node-inspect-debugger", "python-debugpy",
+        "shell-scripting", "bash", "terminal-command-execution",
+        "coding-cli-management", "debug-checklist",
+        "free-bash-safety-primer",
+        # Writing-focused skills (high value for Quill)
+        "book-writing", "human-writing", "clarity-and-grace",
     ]
     # Order: priority skills first, then the rest in alphabetical order
     by_name = {s["name"]: s for s in skills}
