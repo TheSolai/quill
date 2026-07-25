@@ -1024,3 +1024,178 @@ class TestMCPEndpoint:
         # Should return an error
         text = result["content"][0]["text"].lower()
         assert "error" in text or "invalid" in text
+
+
+# --------------------------------------------------------------------------
+# Chapter-write intent detection
+# --------------------------------------------------------------------------
+
+class TestChapterWriteIntent:
+    """Tests for the chapter-write intent extractor. Catches 'write chapter 3',
+    typo'd 'make chapeter 1', reverse 'chapter 3 please write', and the
+    prose-only stripper that cleans up the model's *** wrappers."""
+
+    def test_standard_write_chapter(self):
+        from server import _extract_chapter_write_intent
+        r = _extract_chapter_write_intent("write chapter 3")
+        assert r == {"action": "write_chapter", "target": "chapter-03"}
+
+    def test_make_chapter_typo(self):
+        """The user's actual broken case: 'make chapeter 1'."""
+        from server import _extract_chapter_write_intent
+        r = _extract_chapter_write_intent("make chapeter 1")
+        assert r is not None
+        assert r["target"] == "chapter-01"
+
+    def test_draft_this_chapter(self):
+        from server import _extract_chapter_write_intent
+        r = _extract_chapter_write_intent("draft this chapter")
+        assert r == {"action": "write_chapter", "target": "current"}
+
+    def test_continue(self):
+        from server import _extract_chapter_write_intent
+        r = _extract_chapter_write_intent("continue")
+        assert r is not None
+        assert r["target"] == "current"
+
+    def test_reverse_chapter_3_write(self):
+        from server import _extract_chapter_write_intent
+        r = _extract_chapter_write_intent("chapter 3 — write it")
+        assert r is not None
+        assert r["target"] == "chapter-03"
+
+    def test_scene(self):
+        from server import _extract_chapter_write_intent
+        r = _extract_chapter_write_intent("write scene 2")
+        assert r is not None
+        assert r["target"].startswith("scene-")
+
+    def test_next_thing(self):
+        from server import _extract_chapter_write_intent
+        r = _extract_chapter_write_intent("write the next thing")
+        assert r is not None
+
+    def test_no_intent_for_question(self):
+        from server import _extract_chapter_write_intent
+        r = _extract_chapter_write_intent("what are the themes of this chapter?")
+        assert r is None
+
+    def test_no_intent_for_status(self):
+        from server import _extract_chapter_write_intent
+        assert _extract_chapter_write_intent("hi how are you") is None
+        assert _extract_chapter_write_intent("edit this paragraph") is None
+        assert _extract_chapter_write_intent("") is None
+
+    def test_chapter_named_with_word(self):
+        from server import _extract_chapter_write_intent
+        r = _extract_chapter_write_intent("write chapter one")
+        assert r is not None
+        assert r["target"] == "chapter-one"
+
+    def test_strip_asterisk_wrapper(self):
+        """The user's broken case: model wraps in *** ... *** """
+        from server import _strip_chapter_wrapper
+        text = "***\n\nIt was a dark night.\n\n***"
+        assert _strip_chapter_wrapper(text) == "It was a dark night."
+
+    def test_strip_trailer_question(self):
+        """The user's broken case: model adds 'What happens next?' at the end."""
+        from server import _strip_chapter_wrapper
+        text = "It was a dark night.\n\nWhat happens next?"
+        assert _strip_chapter_wrapper(text) == "It was a dark night."
+
+    def test_strip_combined_wrappers(self):
+        """Full case: *** + prose + 'What happens next?' trailer."""
+        from server import _strip_chapter_wrapper
+        text = "***\n\nIt was a dark night.\n\nWhat happens next?\n***"
+        result = _strip_chapter_wrapper(text)
+        assert "What happens next" not in result
+        assert "It was a dark night" in result
+
+    def test_strip_preamble(self):
+        from server import _strip_chapter_wrapper
+        assert _strip_chapter_wrapper("Here is the chapter:\n\nBody text") == "Body text"
+        assert _strip_chapter_wrapper("Sure! Here's your chapter:\n\nBody text") == "Body text"
+
+    def test_strip_preserves_clean_text(self):
+        from server import _strip_chapter_wrapper
+        clean = "It was a dark night. The rain fell."
+        assert _strip_chapter_wrapper(clean) == clean
+
+
+# --------------------------------------------------------------------------
+# _resolve_chapter_target — must create chapter files on demand
+# --------------------------------------------------------------------------
+
+class TestResolveChapterTarget:
+    """The chapter-write intent used to silently fail when the project had
+    no chapters yet, or when the requested chapter didn't exist. It should
+    now create the file on disk so the prose actually gets saved."""
+
+    def test_creates_chapter_on_fresh_project(self, client):
+        """Brand new project + 'make chapter 1' should create chapter-01.md."""
+        from server import _resolve_chapter_target
+        r = client.post("/api/projects", json={"name": "fresh-chap-test"})
+        pid = r.get_json()["id"]
+        # No chapters exist yet
+        result = _resolve_chapter_target(pid, "chapter-01")
+        assert result == "chapter-01"
+        # File should now exist
+        import os
+        assert os.path.exists(os.path.expanduser(f"~/Quill/projects/{pid}/chapter-01.md"))
+
+    def test_creates_target_chapter_when_missing(self, client):
+        """If project has other chapters but the target is missing, create it."""
+        from server import _resolve_chapter_target
+        r = client.post("/api/projects", json={"name": "mid-project-test"})
+        pid = r.get_json()["id"]
+        # Create chapter-01
+        client.post(f"/api/projects/{pid}/chapters", json={"name": "chapter-01"})
+        # Now ask for chapter-05 (doesn't exist) — should create it
+        result = _resolve_chapter_target(pid, "chapter-05")
+        assert result == "chapter-05"
+        import os
+        assert os.path.exists(os.path.expanduser(f"~/Quill/projects/{pid}/chapter-05.md"))
+
+    def test_resolves_existing_chapter(self, client):
+        from server import _resolve_chapter_target
+        r = client.post("/api/projects", json={"name": "existing-chap-test"})
+        pid = r.get_json()["id"]
+        client.post(f"/api/projects/{pid}/chapters", json={"name": "chapter-03"})
+        result = _resolve_chapter_target(pid, "chapter-03")
+        assert result == "chapter-03"
+
+    def test_resolves_current_to_first_when_no_context(self, client):
+        from server import _resolve_chapter_target
+        r = client.post("/api/projects", json={"name": "current-test"})
+        pid = r.get_json()["id"]
+        client.post(f"/api/projects/{pid}/chapters", json={"name": "chapter-02"})
+        # 'current' falls back to first file
+        result = _resolve_chapter_target(pid, "current")
+        assert result == "chapter-02"
+
+    def test_full_intent_to_written_file(self, client):
+        """End-to-end: 'make chapeter 1' on a fresh project writes to disk."""
+        from unittest.mock import patch, MagicMock
+        from slot_providers import PROVIDERS
+        r = client.post("/api/projects", json={"name": "e2e-intent-test"})
+        pid = r.get_json()["id"]
+        mock_inst = MagicMock()
+        mock_inst.chat.return_value = "It was a dark and stormy night."
+        with patch.dict(PROVIDERS, {"ollama": MagicMock(return_value=mock_inst)}):
+            r = client.post("/api/chat", json={
+                "project_id": pid,
+                "messages": [{"role": "user", "content": "make chapeter 1"}],
+                "stream": False,
+            })
+            assert r.status_code == 200
+            d = r.get_json()
+            assert d.get("chapter_written") == "chapter-01"
+            assert "dark and stormy" in d.get("text", "")
+            # File should be on disk with the content
+            import os
+            fp = os.path.expanduser(f"~/Quill/projects/{pid}/chapter-01.md")
+            assert os.path.exists(fp)
+            with open(fp) as f:
+                content = f.read()
+            assert "dark and stormy" in content

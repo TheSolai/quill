@@ -436,8 +436,28 @@ def chat_completion():
     if write_intent and project_id != "default":
         target_chapter = _resolve_chapter_target(project_id, write_intent["target"])
         if target_chapter:
-            # Build messages with Dross persona
-            system = data.get("system") or _dross_system_prompt()
+            # Use a focused prose-only system prompt so the model writes the
+            # chapter directly without preamble, meta-commentary, or follow-up
+            # questions. The default Quill persona would chat back asking
+            # "what do you want next?" — that's not what we want here.
+            prose_system = (
+                "You are Quill, the AI writing partner in the Quill app. The user is "
+                "a writer. Right now they want you to write the requested chapter.\n\n"
+                "Write the chapter prose directly. Rules:\n"
+                "- Output ONLY the chapter prose (markdown). No preamble, no "
+                "follow-up questions, no meta-commentary.\n"
+                "- Do not wrap the output in asterisks, code fences, or quotation marks.\n"
+                "- Do not begin with 'Here is...' or 'Sure!' or any acknowledgement.\n"
+                "- Do not end with a question to the user.\n"
+                "- Match the tone and style the user has established in earlier "
+                "messages or chapter content.\n"
+                "- Vivid sensory prose, strong character interiority, immersive atmosphere. "
+                "Literary but readable. Short punchy sentences mixed with long flowing "
+                "ones. No purple prose. No clichés.\n"
+                "- If the user gave an outline or notes, follow them. Otherwise write "
+                "freely in the established voice."
+            )
+            system = data.get("system") or prose_system
             full_messages = [{"role": "system", "content": system}] + messages
             try:
                 provider = _slot_providers.get_provider(slot)
@@ -455,6 +475,8 @@ def chat_completion():
             try:
                 # Generate the prose (non-streaming for simplicity)
                 prose = provider.chat(full_messages, **overrides)
+                # Clean up common wrappers the model might add
+                prose = _strip_chapter_wrapper(prose)
                 # Save to chapter file (append, don't overwrite existing content)
                 existing = read_chapter(project_id, target_chapter) or f"# {target_chapter}\n\n"
                 new_content = existing.rstrip() + "\n\n" + prose.strip() + "\n"
@@ -469,12 +491,13 @@ def chat_completion():
                         chunk_size = 80
                         for i in range(0, len(prose), chunk_size):
                             yield f"data: {json.dumps({'token': prose[i:i+chunk_size]})}\n\n"
-                        yield f"data: {json.dumps({'done': True, 'chapter_written': target_chapter, 'project_id': project_id})}\n\n"
+                        yield f"data: {json.dumps({'done': True, 'chapter_written': target_chapter, 'project_id': project_id, 'streamed_chars': len(prose)})}\n\n"
                     return Response(gen_write(), mimetype="text/event-stream",
                                     headers={"Cache-Control": "no-cache"})
                 return {"text": prose, "slot_id": slot_id,
                         "model_id": slot.model_id,
-                        "chapter_written": target_chapter}
+                        "chapter_written": target_chapter,
+                        "streamed_chars": len(prose)}
             except Exception as e:
                 return {"error": f"chapter write failed: {e}"}, 500
 
@@ -774,21 +797,80 @@ def _handle_email_intent(intent: dict, project_id: str) -> dict:
 # chapter file on disk (not just shown in the chat).
 # --------------------------------------------------------------------------
 
-# Cues that suggest the user wants prose written into a chapter
+# Cues that suggest the user wants prose written into a chapter.
+# Verb list: write, draft, fill, generate, create, compose, expand, continue,
+#   make, start, begin, do, build, write out, knock out
+# Chapter noun: chapter, scene, opening, next paragraph/scene, continuation.
+# Typo tolerance: chapt?er, chpter, chpater, etc. all match via the
+# CHAPTER_NOUN pattern below.
+VERB_CUE = (
+    r"(?:write|writes|wrote|writing|draft|drafts|drafted|drafting|"
+    r"fill|fills|filled|filling|generate|generates|generated|generating|"
+    r"create|creates|created|creating|compose|composes|composed|composing|"
+    r"expand|expands|expanded|expanding|continue|continues|continued|continuing|"
+    r"make|makes|made|making|start|starts|started|starting|"
+    r"begin|begins|began|beginning|do|does|did|doing|"
+    r"build|builds|built|building|knock\s+out|pump\s+out|spin\s+up)"
+)
+# "chapter" with up to 2 typos (cha?pt?e?r, chp?at?er, etc.)
+# Built with explicit char classes for the most common typos.
+# chap + 0-3 chars + er matches: chapter, chaptr, chaper, chapeter, etc.
+CHAPTER_NOUN = (
+    r"(?:chap[a-z]{0,3}er|chpter|chapt?er|chapt?re|chaptr|chpater|"
+    r"sce?ne?|scence|sceen|"
+    r"opening|next\s+paragraph|next\s+scene|continuation)"
+)
+# Allow any short word(s) between verb and noun (handles "draft this chapter",
+# "write me chapter 3", etc.)
+BETWEEN = r"(?:\s+(?:up|out|me|us|the|a|an|some|new|this|that|my|your|our)\b)*\s+"
 CHAPTER_WRITE_CUES = re.compile(
-    r"\b(write|draft|fill|generate|create|compose|expand|continue)\b"
-    r"[^.]*?"
-    r"\b(chapter|scene|opening|next\s+paragraph|next\s+scene|continuation)\b",
+    VERB_CUE + BETWEEN + CHAPTER_NOUN,
     re.IGNORECASE,
 )
+# Also catch the reverse phrasing: "chapter 3 please write" or "chapter 1 — write it"
+CHAPTER_WRITE_CUES_REVERSE = re.compile(
+    CHAPTER_NOUN + r"\s+\d*\s*[\-\s,:.;—–]*\s*" + VERB_CUE,
+    re.IGNORECASE,
+)
+# Catches the "write the next thing" case
+NEXT_THING_CUES = re.compile(
+    VERB_CUE + BETWEEN + r"(?:next|more|rest\s+of|continuation)",
+    re.IGNORECASE,
+)
+# Bare "continue" with no other cues — this is a strong chapter-write signal
+BARE_CONTINUE = re.compile(r"^\s*continue\b", re.IGNORECASE)
+# Bare "more please" or "go on" / "keep going" — also strong signals
+BARE_MORE = re.compile(r"^\s*(?:more(?:\s+please)?|go\s+on|keep\s+going|more\s+prose)\b", re.IGNORECASE)
 
 
 def _extract_chapter_write_intent(text: str) -> Optional[dict]:
-    """Detect a chapter-write request. Returns dict or None."""
-    if not CHAPTER_WRITE_CUES.search(text):
+    """Detect a chapter-write request. Returns dict or None.
+
+    Handles:
+      - Standard: "write chapter 3", "draft this chapter", "create chapter 5"
+      - Typos: "make chapeter 1", "write chpter 2"
+      - Reverse: "chapter 3 please", "chapter 1 — write it"
+      - Vague: "write the next thing", "continue", "expand"
+      - Scene: "write scene 2", "draft opening scene"
+    """
+    if not text:
+        return None
+    matched = (
+        CHAPTER_WRITE_CUES.search(text)
+        or CHAPTER_WRITE_CUES_REVERSE.search(text)
+        or NEXT_THING_CUES.search(text)
+        or BARE_CONTINUE.search(text)
+        or BARE_MORE.search(text)
+    )
+    if not matched:
         return None
     # Try to extract a chapter number or name
-    m_num = re.search(r"chapter\s+(\d+|[a-z]+)\b", text, re.IGNORECASE)
+    # First try the corrected-spelling form, then the original
+    m_num = re.search(
+        r"chap[a-z]{0,3}er\s*[-_:]?\s*(\d+|[a-z]+)\b",
+        text,
+        re.IGNORECASE,
+    )
     target_chapter = None
     if m_num:
         num = m_num.group(1)
@@ -796,23 +878,99 @@ def _extract_chapter_write_intent(text: str) -> Optional[dict]:
             target_chapter = f"chapter-{int(num):02d}"
         else:
             target_chapter = f"chapter-{num.lower()}"
-    m_scene = re.search(r"scene\s+(\d+|[a-z]+)\b", text, re.IGNORECASE)
-    if m_scene and not target_chapter:
-        target_chapter = f"scene-{m_scene.group(1).lower()}"
-    # Word "this" or "current" implies the current chapter
-    if not target_chapter and re.search(r"\b(this|current)\s+(chapter|scene)\b", text, re.IGNORECASE):
+    if not target_chapter:
+        m_scene = re.search(
+            r"sce?ne?[\s\-_]*(\d+|[a-z]+)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if m_scene:
+            num = m_scene.group(1)
+            target_chapter = f"scene-{num.lower() if not num.isdigit() else int(num):02d}"
+    if not target_chapter and re.search(
+        r"\b(this|current|next|new)\s+(?:chapter|scene|one|two|three|four|five|six|seven|eight|nine|ten)\b",
+        text,
+        re.IGNORECASE,
+    ):
         target_chapter = "current"
     if not target_chapter:
         return {"action": "write_chapter", "target": "current"}
     return {"action": "write_chapter", "target": target_chapter}
 
 
-def _resolve_chapter_target(project_id: str, target: str) -> Optional[str]:
-    """Resolve a chapter target to an actual chapter name in the project."""
+def _strip_chapter_wrapper(text: str) -> str:
+    """Remove common model wrappers from chapter-write output: leading/trailing
+    asterisks, 'Here is the chapter' preambles, 'What happens next?' trailers.
+    """
+    import re
+    s = text.strip()
+    # Strip leading *** or ** (the model often wraps the whole thing)
+    s = re.sub(r"^\*+\s*", "", s)
+    s = re.sub(r"\s*\*+$", "", s)
+    # If the entire response is wrapped in *** ... *** on its own lines, unwrap it
+    m = re.match(r"^\*+\s*\n(.*?)\n\s*\*+\s*$", s, re.DOTALL)
+    if m:
+        s = m.group(1)
+    # Strip common preambles. Try a few times to handle stacked preambles
+    # like "Sure! Here's your chapter:\n\n...".
+    preambles = [
+        "Here is the chapter:",
+        "Here's the chapter:",
+        "Here is your chapter:",
+        "Here's your chapter:",
+        "Here is chapter",
+        "Here's chapter",
+        "Of course!",
+        "Of course,",
+        "Sure!",
+        "Sure,",
+    ]
+    for _ in range(3):
+        s_l = s.lower()
+        matched_preamble = None
+        for prefix in preambles:
+            if s_l.startswith(prefix.lower()):
+                matched_preamble = prefix
+                break
+        if not matched_preamble:
+            break
+        s = s[len(matched_preamble):].lstrip("\n").lstrip()
+    # Strip common trailers (the model loves to ask "What happens next?")
+    trailer_patterns = [
+        r"\n+\*+\s*What\s+happens\s+next\??\s*\*+\s*$",
+        r"\n+\*+\s*What\s+do\s+you\s+(?:want|think)\s+.*?\??\s*\*+\s*$",
+        r"\n+What\s+happens\s+next\??\s*$",
+        r"\n+What\s+do\s+you\s+(?:want|think)\s+.*?\??\s*$",
+        r"\n+Want\s+me\s+to\s+continue\??\s*$",
+        r"\n+Should\s+I\s+continue\??\s*$",
+    ]
+    for pattern in trailer_patterns:
+        s = re.sub(pattern, "", s, flags=re.IGNORECASE | re.DOTALL)
+    # Re-strip any remaining outer *** if they're only at start/end now
+    s = re.sub(r"^\*+\s*", "", s.strip())
+    s = re.sub(r"\s*\*+$", "", s.strip())
+    return s.strip()
+
+
+def _resolve_chapter_target(project_id: str, target: str, create: bool = True) -> Optional[str]:
+    """Resolve a chapter target to an actual chapter name in the project.
+
+    If `create` is True (default) and the project has no chapters yet, or
+    if the target is a numeric chapter that doesn't exist yet, the chapter
+    is created on disk. This is what makes "make chapter 1" on a fresh
+    project work — without this, the intent would fire but the file
+    wouldn't exist so we'd silently fall through to a regular chat reply.
+    """
     project_dir = get_project_dir(project_id)
     files = sorted([f for f in project_dir.glob("*.md") if f.is_file()],
                    key=lambda p: natural_sort_key(p.stem))
     if not files:
+        # Brand new project — create chapter-01 (or the target as-is) and return it
+        if create:
+            new_name = target if target != "current" else "chapter-01"
+            new_path = project_dir / f"{new_name}.md"
+            new_path.write_text(f"# {new_name.replace('-', ' ').title()}\n\n", encoding="utf-8")
+            return new_name
         return None
     if target == "current":
         # Use project context's current_chapter or first file
@@ -833,6 +991,12 @@ def _resolve_chapter_target(project_id: str, target: str) -> Optional[str]:
         m = re.match(r"chapter[_\-\s]?(\d+)", f.stem, re.IGNORECASE)
         if m and target.endswith(m.group(1)):
             return f.stem
+    # Target didn't match any existing file. If the user asked for a specific
+    # chapter (e.g. "chapter-03") and the file doesn't exist, create it.
+    if create and target != "current":
+        new_path = project_dir / f"{target}.md"
+        new_path.write_text(f"# {target.replace('-', ' ').title()}\n\n", encoding="utf-8")
+        return target
     return None
 
 
