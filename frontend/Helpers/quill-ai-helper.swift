@@ -58,7 +58,7 @@ func main() async -> Int32 {
     }
 
     // Pass-through: unknown subcommand → shell
-    let known = ["status", "ask", "chat", "fix", "expand", "condense", "slots", "projects", "chapters", "scenes", "search", "email", "mcp", "skills", "help"]
+    let known = ["status", "ask", "chat", "fix", "expand", "condense", "slots", "projects", "chapters", "scenes", "search", "email", "mcp", "skills", "claude", "openclaw", "clawhub", "help"]
     if !known.contains(cmd) {
         return runShellPassThrough(args)
     }
@@ -80,6 +80,9 @@ func main() async -> Int32 {
         case "email":     try await cmdEmail(subArgs)
         case "mcp":       try await cmdMcp(subArgs)
         case "skills":    try await cmdSkills(subArgs)
+        case "claude":    try await cmdClaude(subArgs)
+        case "openclaw":  try await cmdOpenclaw(subArgs)
+        case "clawhub":   try await cmdClawhub(subArgs)
         case "help":      printUsage()
         default: break
         }
@@ -127,6 +130,9 @@ func printUsage() {
       email [list|send ...]        List inbox or send an email
       mcp serve                    Start MCP server (stdio JSON-RPC)
       skills [list|show NAME]      List/show OpenClaw skills
+      claude "PROMPT"              Run Claude Code (Anthropic CLI)
+      openclaw "PROMPT"            Run OpenClaw agent
+      clawhub [search|install]     Manage OpenClaw skills
 
     Any other command is passed to /bin/sh -c, so you can run:
       quill ls
@@ -527,6 +533,77 @@ func cmdSkills(_ args: [String]) async throws {
     }
 }
 
+func cmdClaude(_ args: [String]) async throws {
+    // quill claude "<prompt>" — runs Claude Code non-interactively
+    let prompt = args.joined(separator: " ")
+    guard !prompt.isEmpty else {
+        printError("claude: prompt required")
+        print("usage: quill claude \"<prompt>\"")
+        exit(1)
+    }
+    let r = try await httpPost("/api/tools/call", body: [
+        "name": "claude",
+        "args": ["prompt": prompt],
+    ]) as? [String: Any] ?? [:]
+    if let out = r["stdout"] as? String, !out.isEmpty {
+        print(out)
+    }
+    if let err = r["stderr"] as? String, !err.isEmpty {
+        FileHandle.standardError.write(Data("stderr: \(err)\n".utf8))
+    }
+    if let err = r["error"] as? String {
+        printError(err)
+    }
+    if let code = r["returncode"] as? Int, code != 0 {
+        printError("claude exited with code \(code)")
+    }
+}
+
+func cmdOpenclaw(_ args: [String]) async throws {
+    // quill openclaw "<prompt>" — runs the OpenClaw agent
+    let prompt = args.joined(separator: " ")
+    guard !prompt.isEmpty else {
+        printError("openclaw: prompt required")
+        print("usage: quill openclaw \"<prompt>\"")
+        exit(1)
+    }
+    let r = try await httpPost("/api/tools/call", body: [
+        "name": "openclaw",
+        "args": ["prompt": prompt],
+    ]) as? [String: Any] ?? [:]
+    if let out = r["stdout"] as? String, !out.isEmpty {
+        print(out)
+    }
+    if let err = r["stderr"] as? String, !err.isEmpty {
+        FileHandle.standardError.write(Data("stderr: \(err)\n".utf8))
+    }
+    if let err = r["error"] as? String {
+        printError(err)
+    }
+}
+
+func cmdClawhub(_ args: [String]) async throws {
+    // quill clawhub search|install|list|whoami [args]
+    let sub = args.first ?? "list"
+    var body: [String: Any] = ["action": sub]
+    if sub == "search" && args.count > 1 {
+        body["query"] = args.dropFirst().joined(separator: " ")
+    }
+    if sub == "install" && args.count > 1 {
+        body["name"] = args[1]
+    }
+    let r = try await httpPost("/api/tools/call", body: [
+        "name": "clawhub",
+        "args": body,
+    ]) as? [String: Any] ?? [:]
+    if let out = r["stdout"] as? String, !out.isEmpty {
+        print(out)
+    }
+    if let err = r["error"] as? String {
+        printError(err)
+    }
+}
+
 // MARK: - REPL
 
 func runREPL() async {
@@ -550,6 +627,9 @@ func runREPL() async {
             case "email":     try await cmdEmail(Array(parts.dropFirst()))
             case "mcp":       try await cmdMcp(Array(parts.dropFirst()))
             case "skills":    try await cmdSkills(Array(parts.dropFirst()))
+            case "claude":    try await cmdClaude(Array(parts.dropFirst()))
+            case "openclaw":  try await cmdOpenclaw(Array(parts.dropFirst()))
+            case "clawhub":   try await cmdClawhub(Array(parts.dropFirst()))
             case "fix":       try await cmdFix(Array(parts.dropFirst()), instruction: "fix typos and grammar")
             case "expand":    try await cmdFix(Array(parts.dropFirst()), instruction: "expand with sensory detail")
             case "condense":  try await cmdFix(Array(parts.dropFirst()), instruction: "condense and tighten")

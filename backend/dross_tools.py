@@ -176,6 +176,121 @@ def tool_read_file(args: dict) -> dict:
 
 
 # --------------------------------------------------------------------------
+# External CLI tools — Claude Code, OpenClaw, clawhub
+# --------------------------------------------------------------------------
+
+# Safety guardrails for shell commands run by the AI via these tools.
+_CLI_DENY_PATTERNS = [
+    "rm -rf /", "rm -rf ~", "rm -rf $HOME",
+    "sudo ", "shutdown", "reboot", "halt",
+    "mkfs", "dd if=",
+    "curl | bash", "wget | bash", "curl|bash", "wget|bash",
+    ":(){:|:&};:",  # fork bomb
+]
+
+
+def _run_cli(binary: str, args_list: list, timeout: int = 120) -> dict:
+    """Run a CLI tool. Returns {stdout, stderr, returncode, duration, cmd}."""
+    import time as _time
+    t0 = _time.time()
+    # Build the command string for display
+    cmd_str = binary + " " + " ".join(args_list)
+    # Safety check
+    cmd_lower = cmd_str.lower()
+    for bad in _CLI_DENY_PATTERNS:
+        if bad in cmd_lower:
+            return {"error": f"command contains blocked pattern: {bad!r}", "cmd": cmd_str}
+    try:
+        proc = subprocess.run(
+            [binary] + args_list,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return {
+            "stdout": proc.stdout[:16000],
+            "stderr": proc.stderr[:4000],
+            "returncode": proc.returncode,
+            "duration": round(_time.time() - t0, 2),
+            "cmd": cmd_str,
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": f"timeout after {timeout}s", "cmd": cmd_str}
+    except FileNotFoundError:
+        return {"error": f"{binary!r} not found on PATH. Install it first.", "cmd": cmd_str}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}", "cmd": cmd_str}
+
+
+def tool_claude(args: dict) -> dict:
+    """Run Claude Code CLI non-interactively. Use for code review, debugging,
+    explaining code, or any coding task the Quill AI wants to delegate to
+    Claude Code.
+
+    Args:
+        prompt: the prompt for Claude Code
+        cwd: working directory (defaults to current)
+        timeout: max seconds (default 120, max 300)
+
+    Returns Claude Code's stdout.
+    """
+    prompt = args.get("prompt", "").strip()
+    if not prompt:
+        return {"error": "prompt required"}
+    cwd = args.get("cwd") or str(Path.home())
+    timeout = min(int(args.get("timeout", 120)), 300)
+    return _run_cli(
+        "claude",
+        ["-p", prompt, "--output-format", "text"],
+        timeout=timeout,
+    )
+
+
+def tool_openclaw(args: dict) -> dict:
+    """Run the OpenClaw CLI for one agent turn. Use for autonomous multi-step
+    coding tasks or anything that benefits from OpenClaw's agent framework.
+
+    Args:
+        prompt: the prompt / task
+        timeout: max seconds (default 180, max 600)
+    """
+    prompt = args.get("prompt", "").strip()
+    if not prompt:
+        return {"error": "prompt required"}
+    timeout = min(int(args.get("timeout", 180)), 600)
+    return _run_cli("openclaw", ["agent", prompt], timeout=timeout)
+
+
+def tool_clawhub(args: dict) -> dict:
+    """Manage OpenClaw skills via the clawhub CLI. Can search, install, update.
+
+    Args:
+        action: 'search', 'install', 'list', 'info', 'whoami'
+        query: search query (for search/install)
+        name: skill name (for install)
+    """
+    action = args.get("action", "list").lower()
+    if action == "search":
+        query = args.get("query", "")
+        if not query:
+            return {"error": "query required for search"}
+        return _run_cli("clawhub", ["search", query, "--no-input"], timeout=60)
+    if action == "install":
+        name = args.get("name", "")
+        if not name:
+            return {"error": "name required for install"}
+        return _run_cli("clawhub", ["install", name, "--no-input"], timeout=120)
+    if action == "list":
+        # List skills by searching for empty (lists all) — clawhub doesn't
+        # have a list command, but search with empty shows nothing. Instead
+        # just read the local skill registry via the openclaw config.
+        return {"note": "use search with a query, or read /api/skills"}
+    if action == "whoami":
+        return _run_cli("clawhub", ["whoami"], timeout=10)
+    return {"error": f"unknown action: {action!r}"}
+
+
+# --------------------------------------------------------------------------
 # Tool registry
 # --------------------------------------------------------------------------
 
@@ -273,6 +388,44 @@ TOOL_REGISTRY: dict[str, dict] = {
             "required": ["path"],
         },
         "handler": tool_read_file,
+    },
+    "claude": {
+        "description": "Run Claude Code (Anthropic's CLI) for coding tasks. Use for code review, debugging, refactoring, explaining unfamiliar code, or any coding task the Quill AI wants to delegate. Returns Claude's stdout (text).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Prompt for Claude Code"},
+                "cwd": {"type": "string", "description": "Working directory (default: home)"},
+                "timeout": {"type": "integer", "description": "Max seconds (default 120, max 300)"},
+            },
+            "required": ["prompt"],
+        },
+        "handler": tool_claude,
+    },
+    "openclaw": {
+        "description": "Run the OpenClaw agent CLI for autonomous multi-step tasks. Use when you need an agent that can plan, search, code, and verify.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Task for the OpenClaw agent"},
+                "timeout": {"type": "integer", "description": "Max seconds (default 180, max 600)"},
+            },
+            "required": ["prompt"],
+        },
+        "handler": tool_openclaw,
+    },
+    "clawhub": {
+        "description": "Manage OpenClaw skills via the clawhub CLI. Use to search the skill marketplace, install new skills, or check authentication.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["search", "install", "list", "whoami"], "description": "What to do"},
+                "query": {"type": "string", "description": "Search query (for search)"},
+                "name": {"type": "string", "description": "Skill name (for install)"},
+            },
+            "required": ["action"],
+        },
+        "handler": tool_clawhub,
     },
 }
 

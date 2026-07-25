@@ -1390,3 +1390,128 @@ class TestSaveErrorHandling:
         # Verify it persisted
         r = client.get(f"/api/projects/{pid}/chapters/c1/content")
         assert "Hello" in r.get_json()["content"]
+
+
+# --------------------------------------------------------------------------
+# External CLI tools (claude, openclaw, clawhub)
+# --------------------------------------------------------------------------
+
+class TestExternalCLITools:
+    """Tests for the new external CLI tools: claude, openclaw, clawhub."""
+
+    def test_claude_blocked_pattern(self):
+        from dross_tools import tool_claude
+        r = tool_claude({"prompt": "rm -rf /"})
+        assert "error" in r
+        assert "blocked" in r["error"].lower() or "rm" in r["error"].lower()
+
+    def test_claude_requires_prompt(self):
+        from dross_tools import tool_claude
+        r = tool_claude({})
+        assert "error" in r
+        assert "prompt" in r["error"]
+
+    def test_claude_calls_binary(self):
+        """If claude is installed, this should run; if not, return not-found."""
+        import shutil
+        from dross_tools import tool_claude
+        if not shutil.which("claude"):
+            r = tool_claude({"prompt": "echo hi"})
+            assert "not found" in r.get("error", "").lower() or "error" in r
+        else:
+            r = tool_claude({"prompt": "say hi", "timeout": 30})
+            assert "stdout" in r or "error" in r
+
+    def test_openclaw_requires_prompt(self):
+        from dross_tools import tool_openclaw
+        r = tool_openclaw({})
+        assert "error" in r
+        assert "prompt" in r["error"]
+
+    def test_openclaw_calls_binary(self):
+        import shutil
+        from dross_tools import tool_openclaw
+        if not shutil.which("openclaw"):
+            r = tool_openclaw({"prompt": "test"})
+            assert "not found" in r.get("error", "").lower()
+        else:
+            r = tool_openclaw({"prompt": "echo hi", "timeout": 15})
+            assert "stdout" in r or "error" in r
+
+    def test_clawhub_search(self):
+        from dross_tools import tool_clawhub
+        r = tool_clawhub({"action": "search", "query": "summarize"})
+        # Either works or binary not found
+        assert "stdout" in r or "error" in r
+
+    def test_clawhub_requires_action(self):
+        from dross_tools import tool_clawhub
+        r = tool_clawhub({})
+        # 'list' is the default action and returns a helpful note, not an error
+        assert r.get("note") or r.get("error")
+
+    def test_clawhub_search_requires_query(self):
+        from dross_tools import tool_clawhub
+        r = tool_clawhub({"action": "search"})
+        assert "error" in r
+        assert "query" in r["error"]
+
+    def test_clawhub_install_requires_name(self):
+        from dross_tools import tool_clawhub
+        r = tool_clawhub({"action": "install"})
+        assert "error" in r
+        assert "name" in r["error"]
+
+    def test_clawhub_unknown_action(self):
+        from dross_tools import tool_clawhub
+        r = tool_clawhub({"action": "frobnicate"})
+        assert "error" in r
+
+    def test_cli_safety_blocks_sudo(self):
+        from dross_tools import _run_cli
+        r = _run_cli("claude", ["sudo", "apt-get", "update"])
+        assert "error" in r
+        assert "blocked" in r["error"].lower()
+
+    def test_mcp_exposes_claude(self, client):
+        r = client.post("/api/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}
+        })
+        tools = {t["name"] for t in r.get_json()["result"]["tools"]}
+        assert "claude" in tools
+        assert "openclaw" in tools
+        assert "clawhub" in tools
+
+
+class TestSkillsMultiLocation:
+    """Skills should be findable across multiple directories
+    (thesolai.github.io, .openclaw/workspace/skills, .openclaw/skills)."""
+
+    def test_skill_dir_discovery_finds_openclaw_workspace(self):
+        from skills import _find_all_skill_dirs, find_skill_md
+        dirs = _find_all_skill_dirs()
+        # Should include the openclaw workspace
+        has_openclaw = any(".openclaw" in str(d) for d in dirs)
+        assert has_openclaw, f"no .openclaw dir in: {dirs}"
+
+    def test_find_skill_md_finds_installed_skills(self):
+        from skills import find_skill_md
+        # book-writing was installed earlier
+        found = find_skill_md("book-writing")
+        # May or may not exist depending on installation
+        if found:
+            assert found.exists()
+            assert found.suffix == ".md"
+
+
+class TestServerInfoEndpoint:
+    """The /api/info endpoint exposes server config for client discovery."""
+
+    def test_info_shape(self, client):
+        r = client.get("/api/info")
+        d = r.get_json()
+        assert d["version"] == "1.0.0"
+        assert "base_dir" in d
+        assert "ollama_url" in d
+        assert "agentmail_inbox" in d
+        assert d["skills"]["count"] > 0

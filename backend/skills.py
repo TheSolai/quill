@@ -29,18 +29,48 @@ from typing import Optional
 # --------------------------------------------------------------------------
 
 # OpenClaw skills config (the user's local installation)
-# Try the user's repo first (most up to date), then the user's home dir
+# Search in multiple locations. clawhub installs to ~/.openclaw/workspace/skills/,
+# but the user's repo is at ~/Projects/thesolai.github.io/skills/.
+# We try the repo first (most curated), then the OpenClaw workspace.
 _SKILLS_CONFIG_CANDIDATES = [
     Path.home() / "Projects" / "thesolai.github.io" / "skills" / "skill-resolver" / "config.json",
+    Path.home() / ".openclaw" / "workspace" / "skills" / "skill-resolver" / "config.json",
     Path.home() / ".openclaw" / "skills" / "skill-resolver" / "config.json",
     Path("/Users/amre/Projects/thesolai.github.io/skills/skill-resolver/config.json"),
 ]
 
-# Standard skill directory (for SKILL.md content lookups)
+# Standard skill directories (for SKILL.md content lookups). When a
+# skill is referenced in the registry, we look for SKILL.md in all of
+# these places.
 _SKILL_DIR_CANDIDATES = [
     Path.home() / "Projects" / "thesolai.github.io" / "skills",
+    Path.home() / ".openclaw" / "workspace" / "skills",
     Path.home() / ".openclaw" / "skills",
 ]
+
+
+def _find_all_skill_dirs() -> list[Path]:
+    """Return all locations that may contain SKILL.md files."""
+    out = []
+    for c in _SKILL_DIR_CANDIDATES:
+        if c.is_dir() and c not in out:
+            out.append(c)
+    return out
+
+
+def find_skill_md(name: str) -> Optional[Path]:
+    """Search all skill directories for a SKILL.md matching the skill name."""
+    for d in _find_all_skill_dirs():
+        candidate = d / name / "SKILL.md"
+        if candidate.exists():
+            return candidate
+        # Also try with -1-0-0 etc. variants
+        for sub in d.iterdir():
+            if sub.is_dir() and sub.name.startswith(name):
+                skill = sub / "SKILL.md"
+                if skill.exists():
+                    return skill
+    return None
 
 
 def _find_skills_config() -> Optional[Path]:
@@ -188,11 +218,13 @@ def skills_for_prompt(max_skills: int = 25) -> str:
 
 
 def read_skill_md(name: str) -> Optional[str]:
-    """Read the SKILL.md content for a named skill, if it exists locally."""
+    """Read the SKILL.md content for a named skill, if it exists locally.
+
+    Searches in the registry's declared paths first, then falls back to
+    scanning all known skill directories.
+    """
     info = get_skill(name)
-    if not info:
-        return None
-    paths = info.get("paths", [])
+    paths = info.get("paths", []) if info else []
     # Expand ~ and check each path
     for p in paths:
         path = Path(os.path.expanduser(p))
@@ -201,15 +233,13 @@ def read_skill_md(name: str) -> Optional[str]:
                 return path.read_text(encoding="utf-8")
             except Exception:
                 continue
-    # Also try the standard skill dir layout
-    skill_dir = _find_skill_dir()
-    if skill_dir:
-        candidate = skill_dir / name / "SKILL.md"
-        if candidate.exists():
-            try:
-                return candidate.read_text(encoding="utf-8")
-            except Exception:
-                pass
+    # Search all known skill directories
+    found = find_skill_md(name)
+    if found:
+        try:
+            return found.read_text(encoding="utf-8")
+        except Exception:
+            pass
     return None
 
 

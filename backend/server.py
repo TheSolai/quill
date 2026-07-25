@@ -779,6 +779,9 @@ Tools:
 - shell_exec: run a shell command (safety-checked). args: {cmd, cwd?, timeout?}
 - list_files: list files in a directory. args: {path?}
 - read_file: read a text file. args: {path}
+- claude: run Claude Code (Anthropic CLI) for coding tasks. args: {prompt, cwd?, timeout?}
+- openclaw: run the OpenClaw agent CLI for autonomous multi-step tasks. args: {prompt, timeout?}
+- clawhub: manage OpenClaw skills (search marketplace, install, whoami). args: {action, query?, name?}
 
 Working style: dry, direct, no fluff. You collaborate with the user (who is
 also named Quill — the human writer). You never refuse a reasonable request
@@ -2405,6 +2408,44 @@ MCP_TOOLS = [
             "required": ["name"],
         },
     },
+    {
+        "name": "claude",
+        "description": "Run Claude Code (Anthropic's CLI) for coding tasks. Returns Claude's stdout.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "cwd": {"type": "string"},
+                "timeout": {"type": "integer"},
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "openclaw",
+        "description": "Run the OpenClaw agent CLI for autonomous multi-step tasks",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "timeout": {"type": "integer"},
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "clawhub",
+        "description": "Manage OpenClaw skills (search marketplace, install, whoami)",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["search", "install", "list", "whoami"]},
+                "query": {"type": "string"},
+                "name": {"type": "string"},
+            },
+            "required": ["action"],
+        },
+    },
 ]
 
 
@@ -2519,6 +2560,12 @@ def _mcp_call_tool(name, args):
             "paths": info.get("paths", []),
             "content": _skills.read_skill_md(skill_name),
         }
+    if name == "claude":
+        return _dross_tools.call_tool("claude", args)
+    if name == "openclaw":
+        return _dross_tools.call_tool("openclaw", args)
+    if name == "clawhub":
+        return _dross_tools.call_tool("clawhub", args)
     return {"error": f"unknown tool: {name}"}
 
 
