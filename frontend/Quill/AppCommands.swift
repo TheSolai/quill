@@ -10,6 +10,7 @@ final class AppCommandsState: ObservableObject {
     @Published var showNewProject: Bool = false
     @Published var showNewChapter: Bool = false
     @Published var showSaveAs: Bool = false
+    @Published var showEmailBook: Bool = false
 
     /// Most recently opened chapters (file paths) — max 10.
     @Published var recentFiles: [String] = []

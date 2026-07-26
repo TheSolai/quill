@@ -121,6 +121,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         fileMenu.addItem(compileItem)
 
         fileMenu.addItem(NSMenuItem.separator())
+
+        // Failsafe: email the whole book to a recipient of choice.
+        // ⌘⌥M keeps it out of the way of muscle memory. The action is
+        // gated on having a project + a non-empty chapter list (the
+        // backend will 400 if you try it on an empty project).
+        let emailBookItem = NSMenuItem(title: "Email the Book...", action: #selector(emailTheBook), keyEquivalent: "M")
+        emailBookItem.keyEquivalentModifierMask = [.command, .option]
+        emailBookItem.target = self
+        fileMenu.addItem(emailBookItem)
+
+        fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
 
         let fileMenuItem = NSMenuItem(title: "File", action: nil, keyEquivalent: "")
@@ -304,6 +315,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func saveAsDocument() {
         NotificationCenter.default.post(name: .saveAsDocument, object: nil)
+    }
+
+    @objc func emailTheBook() {
+        // Toggle the sheet via the shared state — MainView watches this.
+        Task { @MainActor in
+            AppCommandsState.shared.showEmailBook.toggle()
+        }
     }
 
     @objc func revealCurrentInFinder() {

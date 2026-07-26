@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Quill Backend — Flask server."""
-import os, re, json, subprocess
+import os, re, json, subprocess, time
 from io import BytesIO
 from pathlib import Path
 from datetime import datetime
@@ -1822,6 +1822,109 @@ def agentmail_draft():
     if not _agentmail.is_available():
         return {"error": _agentmail.last_error() or "AgentMail unavailable"}, 503
     return _agentmail.create_draft(to=to, subject=subject, text=text)
+
+
+@app.route("/api/projects/<project_id>/email-the-book", methods=["POST"])
+def email_the_book(project_id):
+    """Failsafe: bundle the project and email it.
+
+    Body: {"to": "you@example.com", "format": "md" | "html", "include_attachments": bool}
+    Default format is "html" so it looks nice in mail clients. The book's
+    markdown source is included as an attachment so the writer can recover
+    the .md text later. Returns the agentmail message_id on success.
+
+    This is the panic button — a single API call from the CLI or the
+    macOS app's "Email the book…" menu item that emails the current
+    manuscript out, no questions asked.
+    """
+    if not _agentmail.is_available():
+        return {"error": _agentmail.last_error() or "AgentMail unavailable"}, 503
+    data = safe_json()
+    to = data.get("to")
+    if not to:
+        return {"error": "to is required"}, 400
+    fmt = (data.get("format") or "html").lower()
+    if fmt not in ("md", "html"):
+        return {"error": f"format must be 'md' or 'html', got {fmt!r}"}, 400
+    include_attachments = bool(data.get("include_attachments", True))
+
+    # 1. Load the project (re-uses the compile pipeline that powers exports)
+    # Use a non-creating lookup first so we can return 404 cleanly without
+    # the auto-mkdir in get_project_dir() materialising an empty project.
+    proj_dir_check = BASE_DIR / project_id
+    if not proj_dir_check.is_dir():
+        return {"error": f"project {project_id!r} not found"}, 404
+    try:
+        compiled, title, ctx, included = compile_book(project_id)
+    except Exception as e:
+        return {"error": f"could not compile book: {e}"}, 500
+    if not included:
+        return {"error": "no chapters in this project — nothing to mail"}, 400
+    settings = ctx.get("settings", {}) or {}
+    title = settings.get("title") or title or project_id
+    author = settings.get("author") or ctx.get("author", "Anonymous")
+
+    # 2. Build the body
+    word_count = len((compiled or "").split())
+    if fmt == "html":
+        try:
+            html_body_only = markdown_to_html(compiled)
+            html_body = build_html_document(title, author, html_body_only, ctx)
+        except Exception as e:
+            return {"error": f"html render failed: {e}"}, 500
+        text_body = None
+    else:  # md
+        text_body = f"# {title}\n\nby {author}\n\n\n" + compiled
+        html_body = None
+
+    # 3. Build the subject
+    date_str = time.strftime("%Y-%m-%d")
+    subject = f"{title} — {date_str} ({word_count} words)"
+
+    # 4. Send via agentmail (or dry-run)
+    dry_run = bool(data.get("dry_run", False))
+    send_args = {"to": to, "subject": subject}
+    if text_body is not None:
+        send_args["text"] = text_body
+    if html_body is not None:
+        send_args["html"] = html_body
+    if include_attachments:
+        # Always attach a .md copy so the writer can recover plain text
+        if fmt == "html":
+            attachment_bytes = (f"# {title}\n\nby {author}\n\n\n" + compiled).encode("utf-8")
+        else:
+            attachment_bytes = (text_body or "").encode("utf-8")
+        safe_title = re.sub(r"[^A-Za-z0-9._-]+", "_", title).strip("_") or "book"
+        send_args["attachments"] = [
+            {"filename": f"{safe_title}.md", "content": attachment_bytes}
+        ]
+    if dry_run:
+        # Don't actually send — return what would be sent.
+        return {
+            "ok": True,
+            "dry_run": True,
+            "would_send_to": to,
+            "subject": subject,
+            "attachment_filename": f"{safe_title}.md" if include_attachments else None,
+            "book": {
+                "title": title,
+                "author": author,
+                "words": word_count,
+                "format": fmt,
+                "size_bytes": len((text_body or html_body or "").encode("utf-8")),
+            },
+        }
+    result = _agentmail.send_email(**send_args)
+    if not result.get("ok"):
+        return result, 500
+    result["book"] = {
+        "title": title,
+        "author": author,
+        "words": word_count,
+        "format": fmt,
+        "size_bytes": len((text_body or html_body or "").encode("utf-8")),
+    }
+    return result
 
 
 # ---- Tool registry (Dross's hands: web search, email, shell, files) ----

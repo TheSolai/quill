@@ -1242,6 +1242,60 @@ class AppState: ObservableObject {
         }
     }
 
+    // ---- Email the book (failsafe) ---------------------------------------
+    //
+    // One-shot — bundle the project, send to a recipient, show a toast.
+    // The user picked ⌥⌘M ("Email the Book...") in the File menu. There
+    // is intentionally no inbox / reply / archive UI; if the user wanted
+    // a mail client they'd use Mail.app. This is the panic button.
+
+    /// Result shape for /api/projects/<id>/email-the-book.
+    struct EmailBookResult: Codable {
+        let ok: Bool?
+        let message_id: String?
+        let subject: String?
+        let would_send_to: String?
+        let attachment_filename: String?
+        let dry_run: Bool?
+        let book: BookSummary?
+        struct BookSummary: Codable {
+            let title: String?
+            let author: String?
+            let words: Int?
+            let format: String?
+            let size_bytes: Int?
+        }
+    }
+
+    /// Returns the parsed response on success, or throws on failure.
+    /// Both dry-run and real-send return the same shape.
+    func emailTheBook(to recipient: String, format: String = "html",
+                      includeAttachments: Bool = true,
+                      dryRun: Bool = false) async throws -> EmailBookResult {
+        guard let project = currentProject else {
+            throw NSError(domain: "Quill", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "No project open"
+            ])
+        }
+        let body: [String: Any] = [
+            "to": recipient,
+            "format": format,
+            "include_attachments": includeAttachments,
+            "dry_run": dryRun,
+        ]
+        let result: EmailBookResult = try await BackendService.shared.post(
+            "/api/projects/\(project.id)/email-the-book",
+            body: body
+        )
+        if dryRun { return result }
+        guard result.ok == true else {
+            throw NSError(domain: "Quill", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Email send failed"
+            ])
+        }
+        return result
+    }
+
     // ---- AI chat sessions ------------------------------------------------
 
     /// Load the current session for the project (creates one if none
