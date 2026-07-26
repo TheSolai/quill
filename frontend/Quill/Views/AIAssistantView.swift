@@ -17,6 +17,7 @@ struct AIAssistantView: View {
     @State private var inputText: String = ""
     @State private var generationMode: AppState.GenerationMode = .long
     @State private var outlineHint: String = ""
+    @State private var chatFocusToken: Int = 0
     @ObservedObject private var slotRegistry = LLMSlotRegistry.shared
 
     private var statusLine: String {
@@ -161,7 +162,8 @@ struct AIAssistantView: View {
                         textColor: NSColor(textPrimary),
                         background: NSColor(bg.opacity(0.5)),
                         border: NSColor(border),
-                        placeholderColor: NSColor(textMuted)
+                        placeholderColor: NSColor(textMuted),
+                        focusToken: chatFocusToken
                     )
                     .frame(minHeight: 38, maxHeight: 100)
                     .overlay(
@@ -224,6 +226,15 @@ struct AIAssistantView: View {
                     Try: *write chapter 3* or *what are the best plot twists for chapter 2?*
                     """
                 ))
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .sendToAI)) { note in
+            // A chapter / scene context menu fired "Send to AI". Drop the
+            // preset text into the chat input and focus the input field so
+            // the writer can finish the thought and hit Return.
+            if let text = note.userInfo?["text"] as? String {
+                inputText = text
+                chatFocusToken &+= 1
             }
         }
     }

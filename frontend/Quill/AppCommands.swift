@@ -83,4 +83,6 @@ extension Notification.Name {
     static let revealCurrentInFinder = Notification.Name("Quill.revealCurrentInFinder")
     static let openCurrentInTerminal = Notification.Name("Quill.openCurrentInTerminal")
     static let selectAIProvider = Notification.Name("Quill.selectAIProvider")
+    /// Send a prompt to the AI chat input. userInfo: { text: String, focus: Bool }
+    static let sendToAI = Notification.Name("Quill.sendToAI")
 }

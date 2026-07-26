@@ -289,6 +289,24 @@ struct SidebarView: View {
                 Task { await state.duplicateChapter(chapter) }
             }
             Divider()
+            Button("Send to AI…") {
+                sendToAI(preset: .extend(chapter))
+            }
+            Menu("Send to AI") {
+                Button("Extend this chapter") {
+                    sendToAI(preset: .extend(chapter))
+                }
+                Button("Continue from this chapter") {
+                    sendToAI(preset: .continue(chapter))
+                }
+                Button("Summarize this chapter") {
+                    sendToAI(preset: .summarize(chapter))
+                }
+                Button("Rewrite tighter") {
+                    sendToAI(preset: .tighten(chapter))
+                }
+            }
+            Divider()
             if let path = chapterPath(chapter) {
                 Button("Reveal in Finder") {
                     AppCommandsState.shared.revealInFinder(path)
@@ -303,6 +321,34 @@ struct SidebarView: View {
             }
         }
         .padding(.horizontal, 6)
+    }
+
+    // MARK: - AI prompts
+
+    private enum AIPreset {
+        case extend(Chapter)
+        case `continue`(Chapter)
+        case summarize(Chapter)
+        case tighten(Chapter)
+    }
+
+    private func sendToAI(preset: AIPreset) {
+        let text: String
+        switch preset {
+        case .extend(let ch):
+            text = "extend @\(ch.name) — "
+        case .continue(let ch):
+            text = "continue from @\(ch.name) — "
+        case .summarize(let ch):
+            text = "summarize @\(ch.name)"
+        case .tighten(let ch):
+            text = "rewrite @\(ch.name) tighter"
+        }
+        NotificationCenter.default.post(
+            name: .sendToAI,
+            object: nil,
+            userInfo: ["text": text, "focus": true, "select": false]
+        )
     }
 
     // MARK: - Path helpers

@@ -1122,6 +1122,177 @@ class TestChapterWriteIntent:
         clean = "It was a dark night. The rain fell."
         assert _strip_chapter_wrapper(clean) == clean
 
+    def test_no_intent_for_list_chapters(self):
+        """The regex used to match 'list the chapters' as 'chapter-s' which
+        created a bogus file. Verify it now returns None."""
+        from server import _extract_chapter_write_intent
+        assert _extract_chapter_write_intent("list the chapters in this project") is None
+        assert _extract_chapter_write_intent("list all chapters") is None
+
+    def test_no_intent_for_tool_meta_instruction(self):
+        """When the user says 'use the write_chapter tool' or 'call
+        write_chapter' that's a meta-instruction; the model should handle
+        it via the tool loop, not the fast intent path."""
+        from server import _extract_chapter_write_intent
+        assert _extract_chapter_write_intent("use the write_chapter tool to create chapter-3") is None
+        assert _extract_chapter_write_intent("please call write_chapter") is None
+        assert _extract_chapter_write_intent("invoke write_chapter with chapter-03") is None
+
+    def test_no_intent_for_read_chapter_tool(self):
+        from server import _extract_chapter_write_intent
+        assert _extract_chapter_write_intent("use read_chapter to look at chapter-01") is None
+        assert _extract_chapter_write_intent("read the chapter using read_chapter") is None
+
+    def test_intent_preserved_for_actual_write(self):
+        """Even after the new tool-aware filters, plain 'write chapter N' and
+        'create chapter-N' must still fire the intent."""
+        from server import _extract_chapter_write_intent
+        assert _extract_chapter_write_intent("write chapter 3") == {
+            "action": "write_chapter", "target": "chapter-03"
+        }
+        assert _extract_chapter_write_intent("create chapter-99 with a short test") == {
+            "action": "write_chapter", "target": "chapter-99"
+        }
+        assert _extract_chapter_write_intent("draft the next chapter") is not None
+
+    def test_chapters_plural_does_not_become_chapter_s(self):
+        """'list the chapters and create chapter-3' should target chapter-03,
+        not 'chapter-s' (which used to happen when 'chapters' was matched)."""
+        from server import _extract_chapter_write_intent
+        r = _extract_chapter_write_intent("list the chapters and create chapter-3")
+        assert r == {"action": "write_chapter", "target": "chapter-03"}
+
+
+# --------------------------------------------------------------------------
+# Tool-call parsing — the AI emits ```tool_call ... ``` blocks; the backend
+# must strip them from the visible response and dispatch to the right tool.
+# --------------------------------------------------------------------------
+
+class TestToolCallParser:
+    """Tests for _parse_tool_calls which extracts `tool_call` code-fence
+    blocks from a model reply so the chat UI never shows raw tool syntax."""
+
+    def test_parse_fenced_tool_call(self):
+        from server import _parse_tool_calls
+        text = (
+            "I'll read the file first.\n"
+            "```tool_call\n"
+            '{"name": "read_file", "args": {"path": "chapter-01.md"}}\n'
+            "```\n"
+            "Let me check that."
+        )
+        visible, calls = _parse_tool_calls(text)
+        assert calls == [
+            {"name": "read_file", "args": {"path": "chapter-01.md"},
+             "raw": '{"name": "read_file", "args": {"path": "chapter-01.md"}}'}
+        ]
+        # The tool_call block must NOT appear in the visible prose
+        assert "tool_call" not in visible
+        assert "I'll read the file first." in visible
+        assert "Let me check that." in visible
+
+    def test_parse_bare_json_tool_call(self):
+        """Some models skip the fence and emit bare JSON. The parser
+        must catch that too so we don't dump raw JSON to the user."""
+        from server import _parse_tool_calls
+        text = (
+            "Reading now.\n"
+            '{"name": "read_file", "args": {"path": "x.md"}}'
+            "\nDone."
+        )
+        visible, calls = _parse_tool_calls(text)
+        assert len(calls) == 1
+        assert calls[0]["name"] == "read_file"
+        assert "Reading now." in visible
+        assert "Done." in visible
+
+    def test_no_tool_call_returns_input_unchanged(self):
+        from server import _parse_tool_calls
+        text = "Just normal prose here, no tools."
+        visible, calls = _parse_tool_calls(text)
+        assert visible == "Just normal prose here, no tools."
+        assert calls == []
+
+    def test_unparseable_block_silently_dropped(self):
+        from server import _parse_tool_calls
+        text = (
+            "Going to try.\n"
+            "```tool_call\n"
+            "{not valid json}\n"
+            "```\n"
+            "Failed gracefully."
+        )
+        visible, calls = _parse_tool_calls(text)
+        # Bad JSON is dropped (not raised). The prose remains.
+        assert calls == []
+        assert "Going to try." in visible
+        assert "Failed gracefully." in visible
+
+    def test_multiple_tool_calls(self):
+        """A model may emit several tool calls in one reply."""
+        from server import _parse_tool_calls
+        text = (
+            "```tool_call\n"
+            '{"name": "list_chapters", "args": {}}\n'
+            "```\n"
+            "```tool_call\n"
+            '{"name": "read_chapter", "args": {"chapter": "chapter-01"}}\n'
+            "```"
+        )
+        visible, calls = _parse_tool_calls(text)
+        assert len(calls) == 2
+        assert calls[0]["name"] == "list_chapters"
+        assert calls[1]["name"] == "read_chapter"
+        assert visible.strip() == ""  # All the content was inside fences
+
+
+class TestToolCallDispatcher:
+    """The dispatcher routes parsed tool calls to the right backend handler.
+    We test the routing without making real network/email calls."""
+
+    def test_dispatch_unknown_tool_returns_error_string(self):
+        from server import _execute_tool_call
+        result = _execute_tool_call("no_such_tool", {}, project_id="default")
+        assert "unknown tool" in result
+
+    def test_dispatch_list_chapters(self, client):
+        """list_chapters is a built-in tool that uses list_markdown_files."""
+        from server import _execute_tool_call
+        client.post("/api/projects", json={"name": "tool-test"})
+        result = _execute_tool_call("list_chapters", {}, project_id="tool-test")
+        # The fresh project has no chapters yet
+        assert "No chapters yet" in result or "tool-test" in result
+
+    def test_dispatch_write_chapter_creates_file(self, client):
+        """write_chapter is a built-in tool that creates a chapter file."""
+        import server
+        from server import _execute_tool_call
+        from pathlib import Path
+        client.post("/api/projects", json={"name": "write-tool-test"})
+        result = _execute_tool_call(
+            "write_chapter",
+            {"chapter": "chapter-01", "content": "It was a dark night."},
+            project_id="write-tool-test",
+        )
+        assert "Wrote" in result
+        # The file should exist on disk
+        path = Path(server.BASE_DIR) / "write-tool-test" / "chapter-01.md"
+        assert path.exists()
+        assert "It was a dark night." in path.read_text()
+
+    def test_dispatch_read_chapter_returns_content(self, client):
+        from server import _execute_tool_call
+        client.post("/api/projects", json={"name": "read-tool-test"})
+        _execute_tool_call(
+            "write_chapter",
+            {"chapter": "chapter-01", "content": "Hello, world."},
+            project_id="read-tool-test",
+        )
+        result = _execute_tool_call(
+            "read_chapter", {"chapter": "chapter-01"}, project_id="read-tool-test"
+        )
+        assert "Hello, world." in result
+
 
 # --------------------------------------------------------------------------
 # _resolve_chapter_target — must create chapter files on demand

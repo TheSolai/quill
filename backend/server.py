@@ -517,6 +517,41 @@ def chat_completion():
                 "freely in the established voice."
             )
             system = data.get("system") or prose_system
+
+            # Inject context: story bible + previous chapters so the model
+            # maintains consistency with what's already been written.
+            ctx = get_project_context(effective_project_id)
+            existing_chapters = sorted(
+                [f for f in get_project_dir(effective_project_id).glob("*.md")
+                 if f.is_file()],
+                key=lambda p: natural_sort_key(p.stem),
+            )
+            context_block = []
+            if ctx.get("characters"):
+                context_block.append(f"CHARACTERS (story bible):\n{ctx['characters']}")
+            if ctx.get("world"):
+                context_block.append(f"WORLD (story bible):\n{ctx['world']}")
+            if ctx.get("summary"):
+                context_block.append(f"PLOT SUMMARY:\n{ctx['summary']}")
+            if ctx.get("style"):
+                context_block.append(f"STYLE GUIDE:\n{ctx['style']}")
+            # Include the previous chapter (if any) for voice continuity
+            prev_chapter_name = None
+            for f in existing_chapters:
+                if f.stem != target_chapter:
+                    prev_chapter_name = f.stem
+            if prev_chapter_name:
+                prev_text = read_chapter(effective_project_id, prev_chapter_name)
+                if prev_text:
+                    # Cap at last 1500 chars so we don't blow up the context window
+                    tail = prev_text[-1500:] if len(prev_text) > 1500 else prev_text
+                    context_block.append(
+                        f"END OF PREVIOUS CHAPTER ({prev_chapter_name}) — "
+                        f"continue from this voice/plot:\n\n...{tail}"
+                    )
+            if context_block:
+                system = system + "\n\n---\n\n" + "\n\n".join(context_block)
+
             full_messages = [{"role": "system", "content": system}] + messages
             try:
                 provider = _slot_providers.get_provider(slot)
@@ -580,20 +615,125 @@ def chat_completion():
         provider = _slot_providers.get_provider(slot)
     except Exception as e:
         return {"error": f"provider init failed: {e}"}, 500
+
+    # ------------------------------------------------------------------
+    # Tool-call loop
+    # ------------------------------------------------------------------
+    # The system prompt tells the model to emit tool calls as
+    #   ```tool_call
+    #   {"name": "...", "args": {...}}
+    #   ```
+    # We parse, execute, feed the result back, and loop until the model
+    # produces a final response with no tool_call blocks. Max 5 iterations
+    # so a runaway loop doesn't hang the request.
+    MAX_TOOL_ITERS = 5
+
+    def _run_tool_loop(call_provider, msgs):
+        """Drive the tool-call loop. Returns the final assistant text
+        plus a list of tool calls that were executed (in order)."""
+        transcript: list[dict] = []  # [{name, args, result}, ...]
+        current_msgs = list(msgs)
+        for it in range(MAX_TOOL_ITERS):
+            text = call_provider(current_msgs, **overrides)
+            visible, calls = _parse_tool_calls(text)
+            if not calls:
+                return visible, transcript
+            transcript.append({"iteration": it, "visible_before_tool": visible})
+            for call in calls:
+                result = _execute_tool_call(
+                    call["name"], call["args"], project_id=project_id
+                )
+                transcript.append({
+                    "name": call["name"],
+                    "args": call["args"],
+                    "result_preview": str(result)[:200],
+                    "result": result,
+                })
+                # Feed the tool result back to the model as an extra
+                # "user" turn so it can use the data in its next reply.
+                current_msgs = current_msgs + [
+                    {"role": "assistant", "content": text},
+                    {"role": "user", "content":
+                        f"Tool result for {call['name']}:\n{result}"},
+                ]
+        return visible, transcript
+
     if stream:
         def gen():
             try:
+                # First pass: stream the model output token-by-token so the
+                # user sees the response appear. If the model emitted any
+                # tool_call blocks, execute them and stream the final
+                # follow-up reply.
+                accumulated = []
                 for token in provider.stream(messages, **overrides):
+                    accumulated.append(token)
                     yield f"data: {json.dumps({'token': token, 'slot_id': slot_id})}\n\n"
-                yield f"data: {json.dumps({'done': True, 'slot_id': slot_id})}\n\n"
+                full = "".join(accumulated)
+                visible, calls = _parse_tool_calls(full)
+                if not calls:
+                    yield f"data: {json.dumps({'done': True, 'slot_id': slot_id})}\n\n"
+                    return
+                # The streamed output contained tool_call syntax. Send a
+                # short system note so the user knows the AI is working,
+                # then execute the tools and stream the follow-up.
+                note = f"\n\n_(using tool: {calls[0]['name']}…)_\n\n"
+                yield f"data: {json.dumps({'token': note, 'slot_id': slot_id})}\n\n"
+                transcript: list[dict] = []
+                current_msgs = list(messages) + [
+                    {"role": "assistant", "content": full},
+                ]
+                for it in range(MAX_TOOL_ITERS):
+                    for call in calls:
+                        result = _execute_tool_call(
+                            call["name"], call["args"], project_id=project_id
+                        )
+                        transcript.append({
+                            "name": call["name"],
+                            "args": call["args"],
+                            "result_preview": str(result)[:200],
+                        })
+                        current_msgs = current_msgs + [{
+                            "role": "user",
+                            "content": f"Tool result for {call['name']}:\n{result}",
+                        }]
+                    # Stream the model's follow-up
+                    accumulated2 = []
+                    for token in provider.stream(current_msgs, **overrides):
+                        accumulated2.append(token)
+                        yield f"data: {json.dumps({'token': token, 'slot_id': slot_id})}\n\n"
+                    full2 = "".join(accumulated2)
+                    visible2, calls = _parse_tool_calls(full2)
+                    if not calls:
+                        yield f"data: {json.dumps({
+                            'done': True,
+                            'slot_id': slot_id,
+                            'tools_used': transcript,
+                        })}\n\n"
+                        return
+                    current_msgs = current_msgs + [
+                        {"role": "assistant", "content": full2},
+                    ]
+                # Hit max iterations — return what we have
+                yield f"data: {json.dumps({
+                    'done': True,
+                    'slot_id': slot_id,
+                    'tools_used': transcript,
+                    'note': 'reached max tool iterations',
+                })}\n\n"
             except Exception as e:
                 yield f"data: {json.dumps({'error': str(e), 'slot_id': slot_id})}\n\n"
         return Response(gen(), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache"})
     else:
         try:
-            text = provider.chat(messages, **overrides)
-            return {"text": text, "slot_id": slot_id, "model_id": slot.model_id}
+            visible, transcript = _run_tool_loop(provider.chat, messages)
+            return {
+                "text": visible,
+                "slot_id": slot_id,
+                "model_id": slot.model_id,
+                "tools_used": transcript,
+            }
         except Exception as e:
             return {"error": str(e)}, 500
 
@@ -776,7 +916,7 @@ def _dross_system_prompt() -> str:
     (from ~/.openclaw/skills or ~/Projects/thesolai.github.io/skills) so
     Quill knows what skills are available and can use them when relevant.
     """
-    base = """You are Quill, the AI writing partner in the Quill app.
+    base = r"""You are Quill, the AI writing partner in the Quill app.
 
 You are a master fiction writer and literary collaborator. Vivid sensory prose,
 strong character interiority, immersive atmosphere. Literary but readable. Short
@@ -791,20 +931,40 @@ Available tools (call by emitting a JSON block in your reply like this):
 {"name": "tool_name", "args": {...}}
 ```
 
-Tools:
+WRITING TOOLS (use these when the user asks you to write, edit, or read chapters):
+- list_chapters: list chapters in the current project. args: {}
+- read_chapter: read a chapter file. args: {chapter: "chapter-03"}  (omit .md)
+- read_file: read any text file. args: {path: "relative/or/absolute/path"}
+- list_files: list files in a directory. args: {path: "."}
+- write_chapter: write content to a chapter file. args: {chapter: "chapter-04", content: "...", mode: "overwrite"|"append"?}
+
+OUTSIDE-WORLD TOOLS:
 - web_search: search the web for current information. args: {query, max_results?}
 - web_fetch: fetch a URL and extract text. args: {url, max_chars?}
 - email_send: send an email from the Quill inbox (thedross@agentmail.to). args: {to, subject, text, html?}
 - email_list_inbox: list recent emails. args: {limit?}
 - email_reply: reply to an email. args: {message_id, text}
 - shell_exec: run a shell command (safety-checked). args: {cmd, cwd?, timeout?}
-- list_files: list files in a directory. args: {path?}
-- read_file: read a text file. args: {path}
 - claude: run Claude Code (Anthropic CLI) for coding tasks. args: {prompt, cwd?, timeout?}
 - codex: run OpenAI Codex CLI for coding tasks. args: {prompt, cwd?, timeout?}
 - openclaw: run the OpenClaw agent CLI for autonomous multi-step tasks. args: {prompt, timeout?}
 - clawhub: manage OpenClaw skills (search marketplace, install, whoami). args: {action, query?, name?}
 - cli_status: check which CLI tools are installed and their auth state. Use to diagnose 'which CLIs can I use right now?'. args: {}
+
+CRITICAL RULES — read these or you will frustrate the user:
+1. The user wants you to ACTUALLY save chapters to disk, not just print prose
+   in the chat. If they say "write chapter 3", you MUST call write_chapter.
+2. Before writing, call list_chapters and read the previous chapter (or
+   read_chapter) for voice consistency and plot continuity. The user will not
+   tolerate the model inventing contradictions.
+3. If the chapter already exists, default to "append" mode. Use "overwrite"
+   only when the user explicitly asks you to start over.
+4. NEVER print the raw `\`\`\`tool_call ... \`\`\`` block in your final
+   visible reply. The chat UI strips it; the user should only see natural
+   prose + the result of your work.
+5. When the user references a chapter with `@chapter-03` syntax (sent by
+   the right-click "Send to AI" menu), that means "use this chapter as
+   context". Call read_chapter on it before responding.
 
 Working style: dry, direct, no fluff. You collaborate with the user (who is
 also named Quill — the human writer). You never refuse a reasonable request
@@ -890,9 +1050,9 @@ VERB_CUE = (
 # Built with explicit char classes for the most common typos.
 # chap + 0-3 chars + er matches: chapter, chaptr, chaper, chapeter, etc.
 CHAPTER_NOUN = (
-    r"(?:chap[a-z]{0,3}er|chpter|chapt?er|chapt?re|chaptr|chpater|"
-    r"sce?ne?|scence|sceen|"
-    r"opening|next\s+paragraph|next\s+scene|continuation)"
+    r"\b(?:chap[a-z]{0,3}er\b|chpter|chapt?er\b|chapt?re|chaptr|chpater|"
+    r"sce?ne?\b|scence|sceen|"
+    r"opening|next\s+paragraph|next\s+scene|continuation)\b"
 )
 # Allow any short word(s) between verb and noun (handles "draft this chapter",
 # "write me chapter 3", etc.)
@@ -926,8 +1086,22 @@ def _extract_chapter_write_intent(text: str) -> Optional[dict]:
       - Reverse: "chapter 3 please", "chapter 1 — write it"
       - Vague: "write the next thing", "continue", "expand"
       - Scene: "write scene 2", "draft opening scene"
+
+    Skips:
+      - Meta-instructions like "use the write_chapter tool to..."
+      - Tool name references like "write_chapter" (no space)
+      - Plural "chapters" (the regex with word boundary avoids this)
     """
     if not text:
+        return None
+    # Bail on meta-instructions — these are about using the tool, not the
+    # fast chapter-write path. The model handles these via the tool loop.
+    if re.search(r"\b(use|call|invoke|run|with)\s+(?:the\s+)?write[_-]chapter\b", text, re.IGNORECASE):
+        return None
+    if re.search(r"\bwrite[_-]chapter\b", text, re.IGNORECASE):
+        # Direct tool name reference — let the model handle it
+        return None
+    if re.search(r"\buse\s+(?:the\s+)?(?:read|list)_?chapter\b", text, re.IGNORECASE):
         return None
     matched = (
         CHAPTER_WRITE_CUES.search(text)
@@ -938,10 +1112,10 @@ def _extract_chapter_write_intent(text: str) -> Optional[dict]:
     )
     if not matched:
         return None
-    # Try to extract a chapter number or name
-    # First try the corrected-spelling form, then the original
+    # Try to extract a chapter number or name. Use a word boundary on the
+    # chapter noun so "chapters" (plural) doesn't match as "chapter-s".
     m_num = re.search(
-        r"chap[a-z]{0,3}er\s*[-_:]?\s*(\d+|[a-z]+)\b",
+        r"\bchap[a-z]{0,3}er\b\s*[-_:]?\s*(\d+|[a-z]+)\b",
         text,
         re.IGNORECASE,
     )
@@ -951,15 +1125,21 @@ def _extract_chapter_write_intent(text: str) -> Optional[dict]:
         if num.isdigit():
             target_chapter = f"chapter-{int(num):02d}"
         else:
+            # Avoid matching the trailing "s" of "chapters" — that produces
+            # bogus "chapter-s" filenames.
+            if num.lower() == "s":
+                return {"action": "write_chapter", "target": "current"}
             target_chapter = f"chapter-{num.lower()}"
     if not target_chapter:
         m_scene = re.search(
-            r"sce?ne?[\s\-_]*(\d+|[a-z]+)\b",
+            r"\bsce?ne?\b[\s\-_]*(\d+|[a-z]+)\b",
             text,
             re.IGNORECASE,
         )
         if m_scene:
             num = m_scene.group(1)
+            if num.lower() == "s":
+                return {"action": "write_chapter", "target": "current"}
             target_chapter = f"scene-{num.lower() if not num.isdigit() else int(num):02d}"
     if not target_chapter and re.search(
         r"\b(this|current|next|new)\s+(?:chapter|scene|one|two|three|four|five|six|seven|eight|nine|ten)\b",
@@ -1024,6 +1204,167 @@ def _strip_chapter_wrapper(text: str) -> str:
     s = re.sub(r"^\*+\s*", "", s.strip())
     s = re.sub(r"\s*\*+$", "", s.strip())
     return s.strip()
+
+
+# --------------------------------------------------------------------------
+# Tool-call parsing
+# --------------------------------------------------------------------------
+#
+# The system prompt tells Quill to emit tool calls as fenced code blocks:
+#
+#     ```tool_call
+#     {"name": "read_file", "args": {"path": "..."}}
+#     ```
+#
+# Most local models (gemma4, llama3, qwen) do this reliably when instructed.
+# This parser is intentionally permissive — it accepts the fenced form AND a
+# bare JSON line for models that drop the fence. Returns the parsed call
+# plus the surrounding prose so the chat UI can show the natural-language
+# part to the user while the tool call is hidden.
+#
+# A model may emit multiple tool calls in one reply (rare but possible);
+# the parser returns the first one and a list of remaining ones so a caller
+# can loop until done.
+
+_TOOL_CALL_FENCE_RE = re.compile(
+    r"```tool_call\s*\n(\{.*?\})\s*\n?```", re.DOTALL
+)
+_TOOL_CALL_BARE_RE = re.compile(
+    r"(?:^|\n)\s*(\{\s*\"name\"\s*:\s*\"[a-z_]+\"\s*,\s*\"args\"\s*:\s*\{.*?\}\s*\})",
+    re.DOTALL,
+)
+
+
+def _parse_tool_calls(text: str) -> tuple[str, list[dict]]:
+    """Pull tool_call blocks out of a model reply.
+
+    Returns:
+        (visible_prose, [tool_calls])
+        - `visible_prose` is the reply with the tool_call blocks removed,
+          so the chat UI never shows raw `tool_call` syntax.
+        - `tool_calls` is a list of {"name": str, "args": dict, "raw": str}.
+    """
+    calls: list[dict] = []
+
+    # First pass: fenced ```tool_call ... ``` blocks
+    def _fence_sub(m: re.Match) -> str:
+        raw = m.group(1).strip()
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            # Try to be helpful — strip trailing commas
+            cleaned = re.sub(r",\s*([}\]])", r"\1", raw)
+            try:
+                obj = json.loads(cleaned)
+            except Exception:
+                return ""  # drop unparseable block silently
+        if isinstance(obj, dict) and "name" in obj and "args" in obj:
+            calls.append({
+                "name": str(obj.get("name", "")).strip(),
+                "args": obj.get("args") or {},
+                "raw": raw,
+            })
+        return ""
+    cleaned = _TOOL_CALL_FENCE_RE.sub(_fence_sub, text)
+
+    # Second pass: bare JSON tool calls the model emitted without a fence
+    if not calls:
+        def _bare_sub(m: re.Match) -> str:
+            raw = m.group(1).strip()
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                return m.group(0)
+            if isinstance(obj, dict) and "name" in obj and "args" in obj:
+                calls.append({
+                    "name": str(obj.get("name", "")).strip(),
+                    "args": obj.get("args") or {},
+                    "raw": raw,
+                })
+                return ""
+            return m.group(0)
+        cleaned = _TOOL_CALL_BARE_RE.sub(_bare_sub, cleaned)
+
+    # Tidy up the visible prose
+    visible = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return visible, calls
+
+
+def _execute_tool_call(name: str, args: dict, project_id: str = "default") -> str:
+    """Dispatch a parsed tool call to the right handler. Returns a
+    human-readable summary string suitable to feed back to the model as a
+    'tool result' message."""
+    try:
+        if name == "read_file":
+            return _dross_tools.call_tool("read_file", {"path": args.get("path", "")})
+        if name == "list_files":
+            return _dross_tools.call_tool("list_files", {"path": args.get("path", ".")})
+        if name == "shell_exec":
+            return _dross_tools.call_tool("shell_exec", {
+                "cmd": args.get("cmd", ""),
+                "cwd": args.get("cwd"),
+                "timeout": args.get("timeout"),
+            })
+        if name == "web_search":
+            return _dross_tools.call_tool("web_search", {
+                "query": args.get("query", ""),
+                "max_results": args.get("max_results"),
+            })
+        if name == "web_fetch":
+            return _dross_tools.call_tool("web_fetch", {
+                "url": args.get("url", ""),
+                "max_chars": args.get("max_chars"),
+            })
+        if name == "email_send":
+            return _dross_tools.call_tool("email_send", args)
+        if name == "email_list_inbox":
+            return _dross_tools.call_tool("email_list_inbox", args)
+        if name == "email_reply":
+            return _dross_tools.call_tool("email_reply", args)
+        if name == "claude":
+            return _dross_tools.call_tool("claude", args)
+        if name == "codex":
+            return _dross_tools.call_tool("codex", args)
+        if name == "openclaw":
+            return _dross_tools.call_tool("openclaw", args)
+        if name == "clawhub":
+            return _dross_tools.call_tool("clawhub", args)
+        if name == "cli_status":
+            return _dross_tools.call_tool("cli_status", args)
+        if name == "write_chapter":
+            # Built-in tool: write content to a chapter file
+            chapter = (args.get("chapter") or args.get("name") or "").strip()
+            content = args.get("content", "")
+            mode = args.get("mode", "overwrite")
+            if not chapter:
+                return "Error: 'chapter' arg is required"
+            if not chapter.lower().endswith(".md"):
+                chapter = chapter + ".md"
+            existing = read_chapter(project_id, chapter) or f"# {chapter.replace('.md', '').replace('-', ' ').title()}\n\n"
+            if mode == "append":
+                new_content = existing.rstrip() + "\n\n" + content.strip() + "\n"
+            else:
+                new_content = content if content.startswith("# ") else f"# {chapter.replace('.md', '').replace('-', ' ').title()}\n\n{content}"
+            write_chapter(project_id, chapter, new_content)
+            return f"Wrote {len(content)} chars to {project_id}/{chapter} (mode={mode})"
+        if name == "read_chapter":
+            chapter = (args.get("chapter") or args.get("name") or "").strip()
+            if not chapter:
+                return "Error: 'chapter' arg is required"
+            if not chapter.lower().endswith(".md"):
+                chapter = chapter + ".md"
+            content = read_chapter(project_id, chapter)
+            if content is None:
+                return f"Error: chapter {chapter} not found in project {project_id}"
+            return content
+        if name == "list_chapters":
+            files = list_markdown_files(project_id)
+            if not files:
+                return f"No chapters yet in project {project_id}."
+            return "\n".join(f"- {f['name']}" for f in files)
+        return f"Error: unknown tool '{name}'"
+    except Exception as e:
+        return f"Tool {name} error: {e}"
 
 
 def _resolve_chapter_target(project_id: str, target: str, create: bool = True) -> Optional[str]:
