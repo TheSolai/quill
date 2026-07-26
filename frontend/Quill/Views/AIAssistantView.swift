@@ -15,7 +15,7 @@ struct AIAssistantView: View {
     var width: CGFloat = 0
 
     @State private var inputText: String = ""
-    @State private var generationMode: AppState.GenerationMode = .long
+    @State private var generationMode: AppState.GenerationMode = .short
     @State private var outlineHint: String = ""
     @State private var chatFocusToken: Int = 0
     @ObservedObject private var slotRegistry = LLMSlotRegistry.shared

@@ -684,10 +684,32 @@ class AppState: ObservableObject {
                     }
                 }
             }
+        } catch is CancellationError {
+            // Task was cancelled (e.g. user switched chapters mid-save).
+            // Don't show an error toast — this is expected behavior.
+            print("[Quill] saveNow: cancelled mid-save (no error to show)")
         } catch let error as BackendError {
             handleSaveError(error: error, previousState: previousState, content: contentToSave)
+        } catch let error as URLError {
+            // Common URLError codes:
+            //   -1001 = request timed out, -1009 = no internet,
+            //   -1004 = can't connect to host, -1005 = network lost
+            let code = error.code.rawValue
+            let desc = error.localizedDescription
+            handleSaveError(
+                error: BackendError.httpError(code, "URLError \(code): \(desc)"),
+                previousState: previousState,
+                content: contentToSave,
+            )
         } catch {
-            handleSaveError(error: BackendError.httpError(0, error.localizedDescription), previousState: previousState, content: contentToSave)
+            let typeName = String(describing: type(of: error))
+            let desc = error.localizedDescription
+            handleSaveError(
+                error: BackendError.networkError(error),
+                previousState: previousState,
+                content: contentToSave,
+            )
+            print("[Quill] saveNow: unexpected error type=\(typeName) desc=\(desc)")
         }
     }
 
@@ -695,7 +717,15 @@ class AppState: ObservableObject {
     /// transient failures, and sets the state appropriately.
     private func handleSaveError(error: Error, previousState: SaveState, content: String) {
         let msg = (error as? BackendError)?.errorDescription ?? error.localizedDescription
-        let isNetworkError = msg.lowercased().contains("network") || msg.lowercased().contains("could not connect")
+        let lower = msg.lowercased()
+        // Network errors that should auto-retry after 5s (backend might be
+        // restarting). Catch the common URLError code descriptions.
+        let isNetworkError = lower.contains("network")
+            || lower.contains("could not connect")
+            || lower.contains("timed out")
+            || lower.contains("urlerror")
+            || lower.contains("not connected")
+            || lower.contains("lost")
         saveState = .error(msg)
         backendError = msg
         // If we were dirty before, restore the dirty state and re-schedule
