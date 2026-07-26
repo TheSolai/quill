@@ -9,7 +9,6 @@ struct MainView: View {
     @State private var sidebarWidth: CGFloat = 240
     @State private var aiWidth: CGFloat = 360
     @State private var newProjectName = ""
-    @State private var showNewChapter = false
     @State private var newChapterName = ""
     @State private var viewMode: SidebarView.ViewMode = .editor
     @State private var showStoryBible: Bool = false
@@ -36,7 +35,7 @@ struct MainView: View {
                     border: border,
                     showNewProject: $commands.showNewProject,
                     newProjectName: $newProjectName,
-                    showNewChapter: $showNewChapter,
+                    showNewChapter: $commands.showNewChapter,
                     newChapterName: $newChapterName,
                     width: sidebarWidth,
                     viewMode: $viewMode,
@@ -142,6 +141,10 @@ struct MainView: View {
             await state.loadProjects()
             await LLMRegistry.shared.detectAndSelect()
             registerPanelTabs()
+            // Make sure a project + chapter are open so the user can type
+            // immediately. Runs after loadProjects and after the panel tabs
+            // are registered (so the Inbox is ready in the background).
+            await state.ensureReady()
         }
         .onChange(of: state.backendError) { _, newError in
             if let error = newError {
@@ -167,7 +170,7 @@ struct MainView: View {
                 onCancel: { commands.showNewProject = false }
             )
         }
-        .sheet(isPresented: $showNewChapter) {
+        .sheet(isPresented: $commands.showNewChapter) {
             NewItemSheet(
                 title: "New Chapter",
                 placeholder: "chapter-4",
@@ -176,11 +179,31 @@ struct MainView: View {
                     Task {
                         await state.createChapter(name: newChapterName)
                         newChapterName = ""
-                        showNewChapter = false
+                        commands.showNewChapter = false
                     }
                 },
-                onCancel: { showNewChapter = false }
+                onCancel: { commands.showNewChapter = false }
             )
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .saveAsDocument)) { _ in
+            // Defer to editor for save-as implementation
+            NotificationCenter.default.post(name: Notification.Name("Quill.presentSaveAs"), object: nil)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .revealCurrentInFinder)) { _ in
+            if let url = state.currentChapterURL() {
+                AppCommandsState.shared.revealInFinder(url)
+                AppCommandsState.shared.recordRecentFile(url)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .selectAIProvider)) { note in
+            // Re-used to handle "open recent" — extract project + chapter from userInfo
+            if let info = note.userInfo,
+               let projectId = info["open_project"] as? String,
+               let chapterName = info["open_chapter"] as? String {
+                Task { @MainActor in
+                    await state.openProjectAndChapter(projectId: projectId, chapterName: chapterName)
+                }
+            }
         }
     }
 

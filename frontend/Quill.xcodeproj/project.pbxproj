@@ -24,6 +24,7 @@
 		70F995D321C92B3F52160D5F /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60F819DF97C48799DA43D12E /* MainView.swift */; };
 		746AB2CAD9464D64A2E852A2 /* LLMProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5161E45303B642C95F0C2431 /* LLMProvider.swift */; };
 		74C599EC3516CA0624154C77 /* InboxTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3440FA6D60F8EA745638403C /* InboxTab.swift */; };
+		84D635AB73BA93D003F8D090 /* ChatInputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBA496ED3217C9B32294A7B9 /* ChatInputView.swift */; };
 		89B61E8687984EC522B07EE7 /* MarkdownTextEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2F33A3BC43906F569232D5 /* MarkdownTextEditor.swift */; };
 		9C58A53707924C96DEF5E39D /* EditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77396D90BE84753BA1372F5B /* EditorView.swift */; };
 		A50AF297BA4386E2430F561D /* LogsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CFB8AAB0DFC8FC75F4DD9E5 /* LogsTab.swift */; };
@@ -62,6 +63,7 @@
 		DB7E1C953A0793130D869C33 /* ExportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportView.swift; sourceTree = "<group>"; };
 		EAD63CF72CB662598A5A279F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		EB422D9667B97C4E0CD3D54A /* PanelContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelContainer.swift; sourceTree = "<group>"; };
+		EBA496ED3217C9B32294A7B9 /* ChatInputView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatInputView.swift; sourceTree = "<group>"; };
 		EFED79796C4ECA1256B55CEF /* StoryBibleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoryBibleView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -113,6 +115,7 @@
 			isa = PBXGroup;
 			children = (
 				0B33DFFA0DED693954E250BB /* AIAssistantView.swift */,
+				EBA496ED3217C9B32294A7B9 /* ChatInputView.swift */,
 				7886B8AD4BBDD0E326FC6A38 /* CorkboardView.swift */,
 				77396D90BE84753BA1372F5B /* EditorView.swift */,
 				DB7E1C953A0793130D869C33 /* ExportView.swift */,
@@ -234,6 +237,7 @@
 				EB831387F0A7E68A6B9B20D7 /* AppCommands.swift in Sources */,
 				078D1842CDFA10FD8E5BF72C /* AppDelegate.swift in Sources */,
 				6190521C86561D9D30E41751 /* BackendService.swift in Sources */,
+				84D635AB73BA93D003F8D090 /* ChatInputView.swift in Sources */,
 				6BFF43DD6477CFC053C9C9C9 /* CorkboardView.swift in Sources */,
 				9C58A53707924C96DEF5E39D /* EditorView.swift in Sources */,
 				2689C04289489540FB58E602 /* ExportView.swift in Sources */,

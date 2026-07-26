@@ -150,29 +150,24 @@ struct AIAssistantView: View {
 
             VStack(spacing: 8) {
                 HStack(alignment: .bottom, spacing: 10) {
-                    TextEditor(text: $inputText)
-                        .font(.system(size: 13, design: .monospaced))
-                        .foregroundColor(textPrimary)
-                        .scrollContentBackground(.hidden)
-                        .background(bg.opacity(0.5))
-                        .cornerRadius(8)
-                        .frame(minHeight: 38, maxHeight: 100)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(border, lineWidth: 1)
-                        )
-                        .overlay(alignment: .topLeading) {
-                            if inputText.isEmpty {
-                                Text(generationMode == .long
-                                     ? "Write a chapter, continue from existing, or research a topic..."
-                                     : "Ask a question, brainstorm, get feedback...")
-                                    .font(.system(size: 12, design: .monospaced))
-                                    .foregroundColor(textMuted)
-                                    .padding(.horizontal, 8)
-                                    .padding(.top, 8)
-                                    .allowsHitTesting(false)
-                            }
-                        }
+                    ChatInputView(
+                        text: $inputText,
+                        placeholder: generationMode == .long
+                            ? "Write a chapter, continue, or research... (⏎ to send, ⇧⏎ for newline)"
+                            : "Ask a question, brainstorm... (⏎ to send, ⇧⏎ for newline)",
+                        isDisabled: state.isStreaming,
+                        onSend: send,
+                        font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+                        textColor: NSColor(textPrimary),
+                        background: NSColor(bg.opacity(0.5)),
+                        border: NSColor(border),
+                        placeholderColor: NSColor(textMuted)
+                    )
+                    .frame(minHeight: 38, maxHeight: 100)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(border, lineWidth: 1)
+                    )
 
                     VStack(spacing: 4) {
                         Button(action: send) {

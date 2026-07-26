@@ -17,6 +17,9 @@ struct EditorView: View {
     @State private var isFixingInline: Bool = false
     @State private var inlineFixRange: NSRange? = nil
     @State private var inlineFixStatus: String = ""  // shown as transient banner
+    @State private var focusToken: Int = 0
+    @State private var showSaveAsSheet: Bool = false
+    @State private var saveAsName: String = ""
     @FocusState private var editorFocused: Bool
     @ObservedObject private var slotRegistry = LLMSlotRegistry.shared
 
@@ -142,7 +145,8 @@ struct EditorView: View {
             },
             font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
             textColor: NSColor(textPrimary),
-            background: NSColor(bgPrimary)
+            background: NSColor(bgPrimary),
+            focusToken: focusToken
         )
         .id("editor-\(state.currentChapter?.id ?? "empty")")
         .padding(20)
@@ -175,7 +179,8 @@ struct EditorView: View {
             }
         }
         .onChange(of: state.currentChapter?.id) { _, _ in
-            editorFocused = true
+            // Refocus the editor after a chapter switch
+            focusToken += 1
             // Clear any pending fix state when switching chapters
             isFixingInline = false
             inlineFixStatus = ""
@@ -183,11 +188,44 @@ struct EditorView: View {
             print("[Quill] EditorView: chapter changed to \(state.currentChapter?.id ?? "nil"), activeContent length=\(activeContent.count)")
         }
         .onAppear {
+            // Focus immediately so the user can start typing
+            focusToken += 1
             print("[Quill] EditorView: appeared, currentChapter=\(state.currentChapter?.id ?? "nil"), activeContent length=\(activeContent.count)")
         }
         .onReceive(NotificationCenter.default.publisher(for: .saveDocument)) { _ in
             // Cmd+S from the menu bar
             Task { await state.saveNow() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("Quill.presentSaveAs"))) { _ in
+            guard state.currentChapter != nil else { return }
+            saveAsName = state.currentChapter?.name ?? ""
+            showSaveAsSheet = true
+        }
+        .sheet(isPresented: $showSaveAsSheet) {
+            VStack(spacing: 16) {
+                Text("Save Chapter As")
+                    .font(.system(size: 14, weight: .bold))
+                Text("Creates a copy of the current chapter with a new name.")
+                    .font(.system(size: 11))
+                    .foregroundColor(textSecondary)
+                    .multilineTextAlignment(.center)
+                TextField("chapter-name", text: $saveAsName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 280)
+                HStack(spacing: 12) {
+                    Button("Cancel") { showSaveAsSheet = false }
+                        .buttonStyle(.bordered)
+                    Button("Save") {
+                        let name = saveAsName
+                        showSaveAsSheet = false
+                        Task { await state.saveChapterAs(newName: name) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(saveAsName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .padding(24)
+            .frame(width: 360)
         }
     }
 

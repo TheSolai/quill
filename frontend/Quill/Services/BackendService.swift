@@ -22,6 +22,10 @@ actor BackendService {
     private let baseURL = "http://127.0.0.1:5323"
     private let session: URLSession
 
+    /// Discovered from /api/info at startup; used for file paths (Reveal in
+    /// Finder, Recent Files, Save As). Updated by `discoverBaseDir()`.
+    nonisolated(unsafe) private(set) var baseDir: String = NSHomeDirectory() + "/Quill/projects"
+
     // Timeouts for LLM-backed operations (long-form generation, multi-pass
     // book writing, etc.) need to be much longer than 30s. Local Ollama can
     // take 60-120s for big generations, especially on first load.
@@ -36,6 +40,20 @@ actor BackendService {
         // should see a clear error if a request really fails.
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.session = URLSession(configuration: config)
+        // Best-effort: discover baseDir in the background so Reveal-in-Finder
+        // and Save As work as soon as the user needs them.
+        Task { await self.discoverBaseDir() }
+    }
+
+    /// Hits /api/info to populate baseDir. Falls back silently.
+    func discoverBaseDir() async {
+        do {
+            struct Info: Decodable { let base_dir: String }
+            let info: Info = try await get("/api/info")
+            self.baseDir = info.base_dir
+        } catch {
+            // Keep default; user can still operate
+        }
     }
 
     private func makeRequest(

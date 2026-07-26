@@ -405,3 +405,68 @@ class TestMarkdownToHtml:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---- Generic file rename ----------------------------------------------------
+
+class TestGenericRename:
+    """Tests for the new /api/rename endpoint used by the app for scene renames
+    and any other file in the project tree."""
+
+    def test_rename_chapter_file(self, client):
+        r = client.post("/api/projects", json={"name": "rename-test"})
+        assert r.status_code == 200
+        pid = r.get_json()["id"]
+        client.post(f"/api/projects/{pid}/chapters", json={"name": "original"})
+        # Rename
+        r = client.post(
+            "/api/rename",
+            json={"from": f"{pid}/original.md", "to": f"{pid}/renamed.md"},
+        )
+        assert r.status_code == 200, r.get_json()
+        body = r.get_json()
+        assert body.get("ok") is True
+        # Verify the file moved
+        r = client.get(f"/api/projects/{pid}/chapters")
+        names = [c["name"] for c in r.get_json()]
+        assert "renamed" in names
+        assert "original" not in names
+
+    def test_rename_missing_source_404(self, client):
+        r = client.post(
+            "/api/rename",
+            json={"from": "no-such-project/missing.md", "to": "no-such-project/x.md"},
+        )
+        assert r.status_code == 404
+
+    def test_rename_rejects_path_traversal(self, client):
+        r = client.post(
+            "/api/rename",
+            json={"from": "../escape.md", "to": "fine.md"},
+        )
+        assert r.status_code == 400
+        assert "error" in r.get_json()
+
+    def test_rename_rejects_absolute_path(self, client):
+        r = client.post(
+            "/api/rename",
+            json={"from": "/etc/passwd", "to": "x.md"},
+        )
+        assert r.status_code == 400
+
+    def test_rename_destination_exists_409(self, client):
+        r = client.post("/api/projects", json={"name": "rename-409"})
+        pid = r.get_json()["id"]
+        client.post(f"/api/projects/{pid}/chapters", json={"name": "a"})
+        client.post(f"/api/projects/{pid}/chapters", json={"name": "b"})
+        r = client.post(
+            "/api/rename",
+            json={"from": f"{pid}/a.md", "to": f"{pid}/b.md"},
+        )
+        assert r.status_code == 409
+
+    def test_rename_requires_from_and_to(self, client):
+        r = client.post("/api/rename", json={"from": "x.md"})
+        assert r.status_code == 400
+        r = client.post("/api/rename", json={"to": "x.md"})
+        assert r.status_code == 400

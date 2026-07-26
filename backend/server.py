@@ -1552,6 +1552,39 @@ def rename_chapter(project_id, chapter_name):
     return {"name": new_name, "path": str(new_path)}
 
 
+@app.route("/api/rename", methods=["POST"])
+def rename_generic():
+    """Generic file rename used by the app for scene renames and any
+    other file in the project tree. The path is relative to BASE_DIR.
+
+    Body:
+        { "from": "project-id/chapter/scene.md", "to": "project-id/chapter/scene-2.md" }
+    """
+    data = safe_json()
+    raw_from = (data.get("from") or "").strip()
+    raw_to = (data.get("to") or "").strip()
+    if not raw_from or not raw_to:
+        return {"error": "from and to required"}, 400
+    if ".." in raw_from or ".." in raw_to or raw_from.startswith("/") or raw_to.startswith("/"):
+        return {"error": "paths must be relative and contain no '..'"}, 400
+    base = Path(BASE_DIR)
+    src = (base / raw_from).resolve()
+    dst = (base / raw_to).resolve()
+    # Ensure both paths are inside BASE_DIR (defense in depth)
+    try:
+        base_resolved = base.resolve()
+    except Exception:
+        base_resolved = base
+    if not str(src).startswith(str(base_resolved)) or not str(dst).startswith(str(base_resolved)):
+        return {"error": "paths must be inside the project base dir"}, 400
+    if not src.exists():
+        return {"error": f"source not found: {raw_from}"}, 404
+    if dst.exists() and src != dst:
+        return {"error": f"destination exists: {raw_to}"}, 409
+    src.rename(dst)
+    return {"ok": True, "from": raw_from, "to": raw_to}
+
+
 @app.route("/api/projects/<project_id>/context", methods=["GET"])
 def get_context(project_id):
     return get_project_context(project_id)

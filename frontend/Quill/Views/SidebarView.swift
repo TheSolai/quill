@@ -177,6 +177,9 @@ struct SidebarView: View {
             }
         }
         .background(bg)
+        .sheet(isPresented: $showRenameSheet) {
+            renameSheet
+        }
     }
 
     private func sceneButton(_ scene: Scene) -> some View {
@@ -201,6 +204,24 @@ struct SidebarView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
+            Button("Rename…") {
+                renameTarget = .scene(scene)
+                renameValue = scene.name
+                showRenameSheet = true
+            }
+            Button("Duplicate") {
+                Task { await state.duplicateScene(scene) }
+            }
+            Divider()
+            if let path = scenePath(scene) {
+                Button("Reveal in Finder") {
+                    AppCommandsState.shared.revealInFinder(path)
+                }
+                Button("Open in Terminal") {
+                    AppCommandsState.shared.openInTerminal(path)
+                }
+                Divider()
+            }
             Button("Delete", role: .destructive) {
                 Task { await state.deleteScene(scene) }
             }
@@ -259,10 +280,87 @@ struct SidebarView: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
+            Button("Rename…") {
+                renameTarget = .chapter(chapter)
+                renameValue = chapter.name
+                showRenameSheet = true
+            }
+            Button("Duplicate") {
+                Task { await state.duplicateChapter(chapter) }
+            }
+            Divider()
+            if let path = chapterPath(chapter) {
+                Button("Reveal in Finder") {
+                    AppCommandsState.shared.revealInFinder(path)
+                }
+                Button("Open in Terminal") {
+                    AppCommandsState.shared.openInTerminal(path)
+                }
+                Divider()
+            }
             Button("Delete", role: .destructive) {
                 Task { await state.deleteChapter(chapter) }
             }
         }
         .padding(.horizontal, 6)
+    }
+
+    // MARK: - Path helpers
+
+    private func chapterPath(_ chapter: Chapter) -> String? {
+        guard let project = state.currentProject else { return nil }
+        return "\(BackendService.shared.baseDir)/\(project.id)/\(chapter.name).md"
+    }
+
+    private func scenePath(_ scene: Scene) -> String? {
+        guard let project = state.currentProject, let chapter = state.currentChapter else { return nil }
+        return "\(BackendService.shared.baseDir)/\(project.id)/\(chapter.name)/\(scene.name).md"
+    }
+
+    // MARK: - Rename sheet state
+
+    private enum RenameTarget {
+        case chapter(Chapter)
+        case scene(Scene)
+    }
+    @State private var renameTarget: RenameTarget?
+    @State private var renameValue: String = ""
+    @State private var showRenameSheet: Bool = false
+
+    private var renameSheet: some View {
+        VStack(spacing: 14) {
+            Text("Rename")
+                .font(.system(size: 14, weight: .bold))
+            TextField("new-name", text: $renameValue)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 280)
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    showRenameSheet = false
+                    renameTarget = nil
+                }
+                .buttonStyle(.bordered)
+                Button("Rename") {
+                    let target = renameTarget
+                    let name = renameValue
+                    showRenameSheet = false
+                    renameTarget = nil
+                    Task {
+                        switch target {
+                        case .chapter(let ch):
+                            await state.renameChapter(ch, to: name)
+                        case .scene(let sc):
+                            await state.renameScene(sc, to: name)
+                        case .none:
+                            break
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(renameValue.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 340)
     }
 }

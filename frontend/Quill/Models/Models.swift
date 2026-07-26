@@ -110,6 +110,12 @@ struct SceneContent: Codable {
     let path: String
 }
 
+struct SceneCreateResponse: Codable {
+    let name: String
+    let path: String?
+    let chapter: String?
+}
+
 // MARK: - Story Bible / Codex
 struct Codex: Codable {
     var characters: String
@@ -205,6 +211,13 @@ enum SaveState: Equatable {
         case .error(let msg): return "save failed: \(msg)"
         }
     }
+
+    /// True when in the error state. Used to force a retry even if the
+    /// content happens to match the last saved version.
+    var isError: Bool {
+        if case .error = self { return true }
+        return false
+    }
 }
 
 @MainActor
@@ -258,6 +271,13 @@ class AppState: ObservableObject {
     private var autosaveTask: Task<Void, Never>?
     private static let autosaveDelayNanos: UInt64 = 2_000_000_000  // 2s
     private static let savedIndicatorNanos: UInt64 = 2_000_000_000  // how long "saved" stays visible
+
+    /// True while a saveNow() is currently executing. Used to coalesce
+    /// concurrent save requests (e.g. autosave + manual save racing).
+    private var saveInFlight: Bool = false
+    /// Content of the most recent successful save. Used to detect when a
+    /// save is still needed after a coalesced wait.
+    private var lastSavedContent: String = ""
 
     init() {
         // Listen for Cmd+S from the menu bar — save the current chapter/scene
@@ -430,6 +450,7 @@ class AppState: ObservableObject {
         autosaveTask?.cancel()
         saveState = .idle
         wordCount = 0
+        lastSavedContent = ""
         lastLoadedProjectId = project.id
         print("[Quill] selectProject: state reset, calling loadChapters")
         await loadChapters()
@@ -481,6 +502,36 @@ class AppState: ObservableObject {
         }
     }
 
+    /// Ensure a project + chapter is open so the user can start typing
+    /// immediately on launch. If no project exists, creates "Default". If
+    /// the current project has no chapters, creates an "untitled.md"
+    /// chapter. Idempotent — safe to call multiple times.
+    func ensureReady() async {
+        // Already ready? Done.
+        if currentProject != nil, currentChapter != nil { return }
+        if projects.isEmpty {
+            print("[Quill] ensureReady: no projects — creating default")
+            await createProject(name: "Default")
+        } else if currentProject == nil {
+            // Pick the first project
+            print("[Quill] ensureReady: no current project — selecting first")
+            currentProject = projects.first
+            lastLoadedProjectId = currentProject?.id
+        }
+        guard let project = currentProject else { return }
+        if chapters.isEmpty {
+            await loadChapters()
+        }
+        if chapters.isEmpty {
+            print("[Quill] ensureReady: no chapters — creating untitled.md")
+            await createChapter(name: "untitled")
+        }
+        if currentChapter == nil, let first = chapters.first {
+            print("[Quill] ensureReady: no current chapter — selecting first")
+            await selectChapter(first)
+        }
+    }
+
     func selectChapter(_ chapter: Chapter) async {
         if currentChapter != nil, isDirty {
             await saveNow()
@@ -498,6 +549,7 @@ class AppState: ObservableObject {
             chapterContent = content.content
             autosaveTask?.cancel()
             saveState = .idle
+            lastSavedContent = content.content
             updateWordCount()
         } catch {
             backendError = error.localizedDescription
@@ -532,13 +584,36 @@ class AppState: ObservableObject {
 
     /// Save the current chapter (or scene) immediately. Updates saveState
     /// throughout the save so the UI can show a saving/saved indicator.
+    /// Concurrent saves are guarded — if a save is already in flight, the
+    /// call coalesces into a single save that picks up the latest content.
     func saveNow() async {
         guard let chapter = currentChapter, let project = currentProject else { return }
+        // If a save is already in progress, wait for it to complete (max 10s)
+        // then re-check whether we still need to save. This prevents the
+        // "Save failed: HTTP 409" race that happens when autosave + manual
+        // save overlap.
+        if saveInFlight {
+            let start = Date()
+            while saveInFlight, Date().timeIntervalSince(start) < 10 {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            // After the in-flight save completes, the content may already match
+            // what's on disk — only re-save if the user typed during the wait.
+            let currentContent = currentScene != nil ? sceneContent : chapterContent
+            if currentContent == lastSavedContent { return }
+        }
+        // No-op short-circuit: if the content hasn't changed since the last
+        // save, don't burn a network round-trip.
+        let currentContent = currentScene != nil ? sceneContent : chapterContent
+        if currentContent == lastSavedContent, !saveState.isError { return }
+        saveInFlight = true
+        defer { saveInFlight = false }
         autosaveTask?.cancel()
         let previousState = saveState
         // Capture the content we're about to save so we can detect later
         // changes that happened during the save.
         let contentToSave = currentScene != nil ? sceneContent : chapterContent
+        lastSavedContent = contentToSave
         saveState = .saving
         do {
             if let scene = currentScene {
@@ -610,6 +685,59 @@ class AppState: ObservableObject {
         await saveNow()
     }
 
+    /// Returns the on-disk path of the current chapter (or scene) — used for
+    /// Reveal in Finder, Recent Files, Save As, etc.
+    func currentChapterURL() -> String? {
+        guard let project = currentProject, let chapter = currentChapter else { return nil }
+        let baseDir = BackendService.shared.baseDir
+        return "\(baseDir)/\(project.id)/\(chapter.name).md"
+    }
+
+    /// Save the current chapter to a new file path. Updates the chapter
+    /// metadata in the backend so the renamed chapter appears in the sidebar.
+    func saveChapterAs(newName: String) async {
+        guard let project = currentProject, let chapter = currentChapter else { return }
+        let safeName = newName.trimmingCharacters(in: .whitespaces)
+        guard !safeName.isEmpty else { return }
+        do {
+            let _: ChapterCreateResponse = try await BackendService.shared.post(
+                "/api/projects/\(project.id)/chapters", body: ["name": safeName]
+            )
+            // Copy current content to the new chapter
+            let content = currentScene != nil ? sceneContent : chapterContent
+            try await BackendService.shared.put(
+                "/api/projects/\(project.id)/chapters/\(safeName)/content",
+                body: ["content": content]
+            )
+            // Reload chapters and select the new one
+            await loadChapters()
+            if let newChapter = chapters.first(where: { $0.name == safeName }) {
+                await selectChapter(newChapter)
+                ToastCenter.shared.postSuccess("Saved as \(safeName).md")
+            }
+        } catch {
+            backendError = error.localizedDescription
+            ToastCenter.shared.postError("Save As failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Open a recent file: find the project, select it, then select the chapter.
+    func openProjectAndChapter(projectId: String, chapterName: String) async {
+        await loadProjects()
+        guard let project = projects.first(where: { $0.id == projectId }) else {
+            ToastCenter.shared.postError("Project '\(projectId)' not found")
+            return
+        }
+        await selectProject(project)
+        // loadChapters is triggered inside selectProject; find the chapter
+        if let chapter = chapters.first(where: { $0.name == chapterName }) {
+            await selectChapter(chapter)
+            ToastCenter.shared.postInfo("Opened \(chapterName).md")
+        } else {
+            ToastCenter.shared.postWarning("Chapter '\(chapterName)' not found in \(projectId)")
+        }
+    }
+
     func deleteChapter(_ chapter: Chapter) async {
         guard let project = currentProject else { return }
         do {
@@ -623,6 +751,124 @@ class AppState: ObservableObject {
             await loadChapters()
         } catch {
             backendError = error.localizedDescription
+        }
+    }
+
+    /// Rename a chapter (uses the backend's /rename endpoint).
+    func renameChapter(_ chapter: Chapter, to newName: String) async {
+        guard let project = currentProject else { return }
+        let safe = newName.trimmingCharacters(in: .whitespaces)
+        guard !safe.isEmpty, safe != chapter.name else { return }
+        do {
+            struct RenameResponse: Codable { let name: String; let path: String }
+            let _: RenameResponse = try await BackendService.shared.post(
+                "/api/projects/\(project.id)/chapters/\(chapter.name)/rename",
+                body: ["name": safe]
+            )
+            let wasCurrent = currentChapter?.id == chapter.id
+            await loadChapters()
+            if wasCurrent, let renamed = chapters.first(where: { $0.name == safe }) {
+                await selectChapter(renamed)
+            }
+            ToastCenter.shared.postSuccess("Renamed to \(safe).md")
+        } catch {
+            backendError = error.localizedDescription
+            ToastCenter.shared.postError("Rename failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Duplicate a chapter — creates a new chapter called "<name>-copy"
+    /// with the same content.
+    func duplicateChapter(_ chapter: Chapter) async {
+        guard let project = currentProject else { return }
+        let baseName = chapter.name + "-copy"
+        // If already exists, append -2, -3, etc.
+        var newName = baseName
+        var counter = 2
+        while chapters.contains(where: { $0.name == newName }) {
+            newName = "\(baseName)-\(counter)"
+            counter += 1
+        }
+        do {
+            // Create the new chapter
+            let _: ChapterCreateResponse = try await BackendService.shared.post(
+                "/api/projects/\(project.id)/chapters", body: ["name": newName]
+            )
+            // Fetch the source content
+            let source: ChapterContent = try await BackendService.shared.get(
+                "/api/projects/\(project.id)/chapters/\(chapter.name)/content"
+            )
+            // Copy the content
+            try await BackendService.shared.put(
+                "/api/projects/\(project.id)/chapters/\(newName)/content",
+                body: ["content": source.content]
+            )
+            await loadChapters()
+            if let dup = chapters.first(where: { $0.name == newName }) {
+                await selectChapter(dup)
+            }
+            ToastCenter.shared.postSuccess("Duplicated as \(newName).md")
+        } catch {
+            backendError = error.localizedDescription
+            ToastCenter.shared.postError("Duplicate failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Rename a scene (file in chapter's scenes subdir).
+    func renameScene(_ scene: Scene, to newName: String) async {
+        guard let project = currentProject, let chapter = currentChapter else { return }
+        let safe = newName.trimmingCharacters(in: .whitespaces)
+        guard !safe.isEmpty, safe != scene.name else { return }
+        // Use the generic file-rename endpoint
+        let oldPath = "\(project.id)/\(chapter.name)/\(scene.name).md"
+        let newPath = "\(project.id)/\(chapter.name)/\(safe).md"
+        do {
+            struct RenameOK: Codable { let ok: Bool?; let `from`: String?; let to: String? }
+            let _: RenameOK = try await BackendService.shared.post(
+                "/api/rename",
+                body: ["from": oldPath, "to": newPath]
+            )
+            let wasCurrent = currentScene?.id == scene.id
+            await loadScenes()
+            if wasCurrent, let renamed = scenes.first(where: { $0.name == safe }) {
+                await selectScene(renamed)
+            }
+            ToastCenter.shared.postSuccess("Renamed to \(safe).md")
+        } catch {
+            ToastCenter.shared.postError("Scene rename failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Duplicate a scene.
+    func duplicateScene(_ scene: Scene) async {
+        guard let project = currentProject, let chapter = currentChapter else { return }
+        let baseName = scene.name + "-copy"
+        var newName = baseName
+        var counter = 2
+        while scenes.contains(where: { $0.name == newName }) {
+            newName = "\(baseName)-\(counter)"
+            counter += 1
+        }
+        do {
+            let _: SceneCreateResponse = try await BackendService.shared.post(
+                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes",
+                body: ["name": newName]
+            )
+            let source: SceneContent = try await BackendService.shared.get(
+                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(scene.name)/content"
+            )
+            try await BackendService.shared.put(
+                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(newName)/content",
+                body: ["content": source.content]
+            )
+            await loadScenes()
+            if let dup = scenes.first(where: { $0.name == newName }) {
+                await selectScene(dup)
+            }
+            ToastCenter.shared.postSuccess("Duplicated as \(newName).md")
+        } catch {
+            backendError = error.localizedDescription
+            ToastCenter.shared.postError("Duplicate failed: \(error.localizedDescription)")
         }
     }
 
@@ -661,6 +907,7 @@ class AppState: ObservableObject {
             sceneContent = content.content
             autosaveTask?.cancel()
             saveState = .idle
+            lastSavedContent = content.content
         } catch {
             backendError = error.localizedDescription
         }

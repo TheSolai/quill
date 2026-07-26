@@ -37,6 +37,73 @@ struct TerminalTab: View {
 
     private static let maxHistoryLines = 2000
 
+    /// Augments an inherited PATH with the directories our writer-friendly
+    /// CLIs live in. The app process may not have these (LaunchServices PATH
+    /// is often sparser than the user's shell PATH), so we make sure `quill`,
+    /// `mmx`, `clawhub`, etc. always resolve.
+    static func augmentedPath(_ inherited: String) -> String {
+        let home = NSHomeDirectory()
+        let extra: [String] = [
+            "\(home)/.local/bin",
+            "\(home)/.opencode/bin",
+            "\(home)/.mavis/bin",
+            "\(home)/.minimax/bin",
+            "\(home)/.bun/bin",
+            "\(home)/.antigravity/antigravity/bin",
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        ]
+        // De-dupe, keep original PATH order, then append the extras we know about
+        var seen = Set<String>()
+        var parts: [String] = []
+        for p in inherited.split(separator: ":").map(String.init) {
+            if !p.isEmpty, !seen.contains(p) {
+                seen.insert(p)
+                parts.append(p)
+            }
+        }
+        for p in extra where !seen.contains(p) {
+            seen.insert(p)
+            parts.append(p)
+        }
+        return parts.joined(separator: ":")
+    }
+
+    /// Detect a "command not found" line and emit a friendly hint if the
+    /// user typed something close to a known CLI (e.g. `minimax` → `mmx`).
+    static func hintForUnknownCommand(_ stderr: String) -> String? {
+        let lower = stderr.lowercased()
+        guard lower.contains("command not found") || lower.contains("not found") else {
+            return nil
+        }
+        // Pull the typed command out of the error line
+        // Typical: "sh: 1: minimax: not found"  or  "/bin/sh: minimax: command not found"
+        let pattern = #"(?:sh:\s*\d+:\s*|/bin/sh:\s*)([a-zA-Z0-9_\-]+):"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(
+                in: stderr, range: NSRange(stderr.startIndex..., in: stderr)
+              ),
+              match.numberOfRanges >= 2,
+              let cmdRange = Range(match.range(at: 1), in: stderr)
+        else { return nil }
+        let typed = String(stderr[cmdRange]).lowercased()
+        switch typed {
+        case "minimax":
+            return "💡 \"minimax\" is the cloud AI. Try `mmx \"<prompt>\"` or `quill mmx \"<prompt>\"`."
+        case "mmx":
+            return "💡 `mmx` lives in /opt/homebrew/bin or ~/.local/bin. Run `quill setup` to check."
+        case "gpt", "chatgpt":
+            return "💡 Try `quill ask \"<prompt>\"` (uses local Ollama)."
+        case "ollama":
+            return "💡 Ollama isn't on PATH. Start it with `ollama serve` or check `quill setup`."
+        default:
+            return nil
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Output area
@@ -231,6 +298,11 @@ struct TerminalTab: View {
         process.standardError = stderrPipe
         process.currentDirectoryURL = URL(fileURLWithPath: currentDir)
         var env = ProcessInfo.processInfo.environment
+        // Augment PATH with the locations of writer-friendly CLIs that the
+        // parent app process may not have inherited (LaunchServices PATH can
+        // omit ~/.local/bin, /opt/homebrew/bin, etc.). This makes `quill`,
+        // `mmx`, `clawhub`, etc. always resolve inside the embedded terminal.
+        env["PATH"] = Self.augmentedPath(env["PATH"] ?? "")
         env["TERM"] = "dumb"  // most programs respect this and skip ANSI
         env["NO_COLOR"] = "1"
         process.environment = env
@@ -258,6 +330,9 @@ struct TerminalTab: View {
         }
         if !stderrStr.isEmpty {
             addEntry(.error(stderrStr))
+            if let hint = Self.hintForUnknownCommand(stderrStr) {
+                addEntry(.info(hint))
+            }
         }
         if stdoutStr.isEmpty && stderrStr.isEmpty && status == 0 {
             addEntry(.info("(no output, exit 0)"))

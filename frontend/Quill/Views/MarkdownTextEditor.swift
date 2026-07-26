@@ -19,6 +19,10 @@ struct MarkdownTextEditor: NSViewRepresentable {
     let font: NSFont
     let textColor: NSColor
     let background: NSColor
+    /// When set to a new value, the editor will request focus on the next
+    /// update. Use a token (Int) that you increment when you want to refocus
+    /// (e.g. on appear, on chapter switch).
+    var focusToken: Int = 0
 
     func makeNSView(context: Context) -> NSScrollView {
         // Use FixableTextView (subclass) so Tab gets intercepted for AI fix
@@ -59,6 +63,15 @@ struct MarkdownTextEditor: NSViewRepresentable {
         }
         // Update indicator state on the coordinator
         context.coordinator.isFixing = isFixing
+        // Request focus if the focus token has changed
+        if context.coordinator.lastFocusToken != focusToken {
+            context.coordinator.lastFocusToken = focusToken
+            // Defer the focus request so SwiftUI has time to lay out the view
+            DispatchQueue.main.async { [weak textView] in
+                guard let tv = textView else { return }
+                tv.window?.makeFirstResponder(tv)
+            }
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -94,6 +107,7 @@ struct MarkdownTextEditor: NSViewRepresentable {
         var parent: MarkdownTextEditor
         weak var textView: NSTextView?
         var isFixing: Bool = false
+        var lastFocusToken: Int = 0
         private var isInternalUpdate = false
 
         init(parent: MarkdownTextEditor) {
