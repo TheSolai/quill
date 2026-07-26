@@ -649,3 +649,79 @@ class TestCodexExpansion:
         assert body["tone"] == ""
         assert body["pov"] == ""
         assert body["tense"] == ""
+
+
+# ---- Chapter reorder ------------------------------------------------------
+
+class TestChapterReorder:
+    """The Swift sidebar lets the writer drag-to-reorder chapters via
+    List .onMove. The new /reorder endpoint persists the order in the
+    project context so it survives restarts."""
+
+    def test_reorder_chapter_file(self, client):
+        r = client.post("/api/projects", json={"name": "reorder-files"})
+        pid = r.get_json()["id"]
+        for n in ["alpha", "bravo", "charlie", "delta"]:
+            client.post(f"/api/projects/{pid}/chapters", json={"name": n})
+        # Default order is natural-sort (alpha, bravo, charlie, delta)
+        r = client.get(f"/api/projects/{pid}/chapters")
+        assert [c["name"] for c in r.get_json()] == ["alpha", "bravo", "charlie", "delta"]
+        # Reorder
+        r = client.post(
+            f"/api/projects/{pid}/chapters/reorder",
+            json={"order": ["delta", "bravo", "charlie", "alpha"]},
+        )
+        assert r.status_code == 200
+        assert r.get_json()["ok"] is True
+        # Verify the new order
+        r = client.get(f"/api/projects/{pid}/chapters")
+        assert [c["name"] for c in r.get_json()] == ["delta", "bravo", "charlie", "alpha"]
+
+    def test_reorder_preserves_files(self, client):
+        """Reorder should not rename or delete files — only the order
+        changes. The file content should be untouched."""
+        r = client.post("/api/projects", json={"name": "reorder-files2"})
+        pid = r.get_json()["id"]
+        client.post(f"/api/projects/{pid}/chapters", json={"name": "x"})
+        client.put(
+            f"/api/projects/{pid}/chapters/x/content",
+            json={"content": "# X\n\noriginal content"},
+        )
+        client.post(f"/api/projects/{pid}/chapters", json={"name": "y"})
+        client.put(
+            f"/api/projects/{pid}/chapters/y/content",
+            json={"content": "# Y\n\ny content"},
+        )
+        client.post(f"/api/projects/{pid}/chapters/reorder",
+                    json={"order": ["y", "x"]})
+        # Files still exist with their original content
+        r = client.get(f"/api/projects/{pid}/chapters/x/content")
+        assert "original content" in r.get_json()["content"]
+        r = client.get(f"/api/projects/{pid}/chapters/y/content")
+        assert "y content" in r.get_json()["content"]
+
+    def test_reorder_omitted_chapter_appended(self, client):
+        """If the order list doesn't include every chapter, missing ones
+        are appended at the end (in natural-sort order)."""
+        r = client.post("/api/projects", json={"name": "reorder-partial"})
+        pid = r.get_json()["id"]
+        for n in ["a", "b", "c", "d"]:
+            client.post(f"/api/projects/{pid}/chapters", json={"name": n})
+        # Order list only mentions d and a
+        client.post(f"/api/projects/{pid}/chapters/reorder",
+                    json={"order": ["d", "a"]})
+        # b and c get appended
+        r = client.get(f"/api/projects/{pid}/chapters")
+        names = [c["name"] for c in r.get_json()]
+        assert names[:2] == ["d", "a"]
+        assert set(names) == {"a", "b", "c", "d"}
+
+    def test_reorder_invalid_input(self, client):
+        r = client.post("/api/projects", json={"name": "reorder-bad"})
+        pid = r.get_json()["id"]
+        # Missing 'order' field
+        r = client.post(f"/api/projects/{pid}/chapters/reorder", json={})
+        assert r.status_code == 400
+        # order is not a list
+        r = client.post(f"/api/projects/{pid}/chapters/reorder", json={"order": "x"})
+        assert r.status_code == 400

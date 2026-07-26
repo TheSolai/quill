@@ -1127,6 +1127,26 @@ class AppState: ObservableObject {
         }
     }
 
+    /// Reorder chapters in the sidebar. Called from the List's .onMove
+    /// callback. Updates the local list immediately, then POSTs the new
+    /// order to the backend so it persists across launches.
+    func reorderChapters(from source: IndexSet, to destination: Int) async {
+        guard let project = currentProject else { return }
+        chapters.move(fromOffsets: source, toOffset: destination)
+        let order = chapters.map { $0.name }
+        do {
+            struct R: Codable { let ok: Bool? }
+            let _: R = try await BackendService.shared.post(
+                "/api/projects/\(project.id)/chapters/reorder",
+                body: ["order": order]
+            )
+        } catch {
+            // Soft-fail: the local list is already updated; on next
+            // loadChapters() the backend will return the saved order.
+            backendError = "Reorder saved locally but failed to persist: \(error.localizedDescription)"
+        }
+    }
+
     /// Rename a chapter (uses the backend's /rename endpoint).
     func renameChapter(_ chapter: Chapter, to newName: String) async {
         guard let project = currentProject else { return }

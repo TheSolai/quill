@@ -18,6 +18,8 @@ struct AIAssistantView: View {
     @State private var generationMode: AppState.GenerationMode = .short
     @State private var outlineHint: String = ""
     @State private var chatFocusToken: Int = 0
+    @State private var showSlashMenu: Bool = false
+    @State private var slashMenuSelection: Int = 0
     @ObservedObject private var slotRegistry = LLMSlotRegistry.shared
 
     private var statusLine: String {
@@ -26,6 +28,17 @@ struct AIAssistantView: View {
         return generationMode == .long
             ? "Long form · multi-pass · \(shortModel)"
             : "Chat · \(shortModel)"
+    }
+
+    /// The user's in-progress slash command, extracted from `inputText`.
+    /// Empty when the input doesn't start with `/`. Drives the popover filter.
+    private var slashQuery: String {
+        guard inputText.hasPrefix("/") else { return "" }
+        let q = String(inputText.dropFirst())
+        if let space = q.firstIndex(of: " ") {
+            return String(q[..<space])
+        }
+        return q
     }
 
     var body: some View {
@@ -158,25 +171,60 @@ struct AIAssistantView: View {
 
             VStack(spacing: 8) {
                 HStack(alignment: .bottom, spacing: 10) {
-                    ChatInputView(
-                        text: $inputText,
-                        placeholder: generationMode == .long
-                            ? "Write a chapter, continue, or research... (⏎ to send, ⇧⏎ for newline)"
-                            : "Ask a question, brainstorm... (⏎ to send, ⇧⏎ for newline)",
-                        isDisabled: state.isStreaming,
-                        onSend: send,
-                        font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-                        textColor: NSColor(textPrimary),
-                        background: NSColor(bg.opacity(0.5)),
-                        border: NSColor(border),
-                        placeholderColor: NSColor(textMuted),
-                        focusToken: chatFocusToken
-                    )
-                    .frame(minHeight: 38, maxHeight: 100)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(border, lineWidth: 1)
-                    )
+                    // Slash-command autocomplete: shown above the input
+                    // when the user is typing `/something`.
+                    ZStack(alignment: .topLeading) {
+                        ChatInputView(
+                            text: $inputText,
+                            placeholder: generationMode == .long
+                                ? "Write a chapter, continue, or research... (type / for commands)"
+                                : "Ask a question, brainstorm... (type / for commands)",
+                            isDisabled: state.isStreaming,
+                            onSend: send,
+                            font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+                            textColor: NSColor(textPrimary),
+                            background: NSColor(bg.opacity(0.5)),
+                            border: NSColor(border),
+                            placeholderColor: NSColor(textMuted),
+                            focusToken: chatFocusToken
+                        )
+                        .frame(minHeight: 38, maxHeight: 100)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(border, lineWidth: 1)
+                        )
+
+                        if showSlashMenu {
+                            SlashCommandPopover(
+                                query: slashQuery,
+                                selection: $slashMenuSelection,
+                                accent: accent,
+                                textPrimary: textPrimary,
+                                textSecondary: textSecondary,
+                                textMuted: textMuted,
+                                border: border,
+                                onSelect: { cmd in
+                                    inputText = cmd.example + " "
+                                    showSlashMenu = false
+                                    chatFocusToken &+= 1
+                                }
+                            )
+                            // Position above the input
+                            .offset(y: -8)
+                            .transition(.opacity)
+                        }
+                    }
+                    .onChange(of: inputText) { _, new in
+                        // Show the popover only when the user is actively
+                        // typing a slash command (starts with `/` and has no
+                        // space yet).
+                        if new.hasPrefix("/") && !new.contains(" ") {
+                            showSlashMenu = true
+                            slashMenuSelection = 0
+                        } else {
+                            showSlashMenu = false
+                        }
+                    }
 
                     VStack(spacing: 4) {
                         Button(action: send) {
@@ -250,6 +298,10 @@ struct AIAssistantView: View {
                 chatFocusToken &+= 1
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .focusChat)) { _ in
+            // Cmd+K — focus the chat input
+            chatFocusToken &+= 1
+        }
     }
 
     private func modeButton(label: String, icon: String, mode: AppState.GenerationMode) -> some View {
@@ -276,9 +328,30 @@ struct AIAssistantView: View {
     }
 
     private func send() {
+        // If the slash-command popover is open, Return should select the
+        // highlighted command rather than send a message.
+        if showSlashMenu {
+            let filtered = slashCommands.filter { cmd in
+                let q = slashQuery.lowercased()
+                if q.isEmpty || q == "/" { return true }
+                let stripped = q.hasPrefix("/") ? String(q.dropFirst()) : q
+                return cmd.id.lowercased().contains(stripped)
+                    || cmd.title.lowercased().contains(stripped)
+                    || cmd.hint.lowercased().contains(stripped)
+            }
+            if !filtered.isEmpty {
+                let safeIdx = min(slashMenuSelection, filtered.count - 1)
+                let chosen = filtered[safeIdx]
+                inputText = chosen.example + " "
+                showSlashMenu = false
+                chatFocusToken &+= 1
+                return
+            }
+        }
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         inputText = ""
+        showSlashMenu = false
         Task {
             await state.sendMessage(
                 text,
@@ -393,6 +466,128 @@ struct BackendStatusDot: View {
         if !backendReady { return "Backend is unreachable. Start the Python server." }
         if !ollamaReachable { return "Backend is up, but Ollama is not responding. Check `ollama serve`." }
         return "Backend and Ollama are ready."
+    }
+}
+
+// MARK: - Slash command autocomplete
+// When the user types `/` in the chat input, a popover appears with the
+// available slash commands. Up/Down navigates, Return selects. The
+// selected command is inserted into the input.
+struct SlashCommand: Identifiable {
+    let id: String
+    let title: String
+    let hint: String
+    let example: String
+}
+
+let slashCommands: [SlashCommand] = [
+    SlashCommand(id: "new",     title: "/new",
+                 hint: "Start a fresh chat session",
+                 example: "/new"),
+    SlashCommand(id: "list",    title: "/list",
+                 hint: "Show all sessions for this project",
+                 example: "/list"),
+    SlashCommand(id: "switch",  title: "/switch <id>",
+                 hint: "Load a previous session",
+                 example: "/switch ses_20260726_060622"),
+    SlashCommand(id: "delete",  title: "/delete <id>",
+                 hint: "Remove a session",
+                 example: "/delete ses_20260726_060622"),
+    SlashCommand(id: "rename",  title: "/rename <title>",
+                 hint: "Rename the current session",
+                 example: "/rename Lila's opening scene"),
+    SlashCommand(id: "extract", title: "/extract",
+                 hint: "Read all chapters → populate Story Bible",
+                 example: "/extract"),
+    SlashCommand(id: "bible",   title: "/bible [field]",
+                 hint: "Show a Story Bible field (list, characters, themes…)",
+                 example: "/bible characters"),
+]
+
+// MARK: - SlashCommandPopover
+// Floats above the chat input when the user types `/`. Shows the matching
+// commands with hints and a one-keyboard-shortcut path to insert them.
+struct SlashCommandPopover: View {
+    let query: String
+    @Binding var selection: Int
+    let accent: Color
+    let textPrimary: Color
+    let textSecondary: Color
+    let textMuted: Color
+    let border: Color
+    let onSelect: (SlashCommand) -> Void
+
+    private var filtered: [SlashCommand] {
+        let q = query.lowercased()
+        if q.isEmpty || q == "/" {
+            return slashCommands
+        }
+        let stripped = q.hasPrefix("/") ? String(q.dropFirst()) : q
+        return slashCommands.filter {
+            $0.id.lowercased().contains(stripped)
+                || $0.title.lowercased().contains(stripped)
+                || $0.hint.lowercased().contains(stripped)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Image(systemName: "command")
+                    .font(.system(size: 9))
+                Text("SLASH COMMANDS")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                Spacer()
+                Text("↑↓ navigate · ⏎ select · esc close")
+                    .font(.system(size: 8, design: .monospaced))
+                    .foregroundColor(textMuted)
+            }
+            .foregroundColor(textMuted)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(accent.opacity(0.1))
+
+            Divider()
+
+            if filtered.isEmpty {
+                Text("No matching commands")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(textMuted)
+                    .italic()
+                    .padding(10)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(filtered.enumerated()), id: \.element.id) { idx, cmd in
+                            Button(action: { onSelect(cmd) }) {
+                                HStack(spacing: 8) {
+                                    Text(cmd.title)
+                                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                        .foregroundColor(accent)
+                                        .frame(minWidth: 110, alignment: .leading)
+                                    Text(cmd.hint)
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundColor(textSecondary)
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(idx == selection ? accent.opacity(0.2) : Color.clear)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .frame(maxHeight: 180)
+            }
+        }
+        .background(Color(hex: "1e1e2e"))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(border, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.4), radius: 8, x: 0, y: 4)
     }
 }
 

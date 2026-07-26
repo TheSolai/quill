@@ -202,6 +202,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         toggleSidebarItem.target = self
         viewMenu.addItem(toggleSidebarItem)
 
+        // Focus shortcuts — Cmd+L jumps to the chapter editor, Cmd+K to
+        // the AI chat input. Both post notifications that the views
+        // listen to and bump their focusToken.
+        let focusEditorItem = NSMenuItem(title: "Focus Editor", action: #selector(focusEditor), keyEquivalent: "l")
+        focusEditorItem.target = self
+        viewMenu.addItem(focusEditorItem)
+
+        let focusChatItem = NSMenuItem(title: "Focus Chat", action: #selector(focusChat), keyEquivalent: "k")
+        focusChatItem.target = self
+        viewMenu.addItem(focusChatItem)
+
         viewMenu.addItem(NSMenuItem.separator())
 
         // Panel toggle (Cmd+J, like Zed)
@@ -353,6 +364,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func toggleSidebar() {
         NotificationCenter.default.post(name: .toggleSidebar, object: nil)
+    }
+
+    @objc func focusEditor() {
+        NotificationCenter.default.post(name: .focusEditor, object: nil)
+    }
+
+    @objc func focusChat() {
+        NotificationCenter.default.post(name: .focusChat, object: nil)
     }
 
     @objc func togglePanel() {

@@ -209,6 +209,12 @@ struct EditorView: View {
             // Cmd+S from the menu bar
             Task { await state.saveNow() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .focusEditor)) { _ in
+            // Cmd+L — focus the editor. Only if a chapter is open.
+            if state.currentChapter != nil {
+                focusToken += 1
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("Quill.presentSaveAs"))) { _ in
             guard state.currentChapter != nil else { return }
             saveAsName = state.currentChapter?.name ?? ""
@@ -332,6 +338,7 @@ struct EditorView: View {
                 Circle()
                     .fill(accent)
                     .frame(width: 6, height: 6)
+                    .modifier(BounceAnimation())
                 Text("unsaved")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(accent)
@@ -350,6 +357,7 @@ struct EditorView: View {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 10))
                     .foregroundColor(.green)
+                    .modifier(BounceAnimation())
                 Text("saved")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.green)
@@ -1123,5 +1131,22 @@ struct ServerButton: View {
         case "custom": return "wrench.and.screwdriver"
         default: return "questionmark.circle"
         }
+    }
+}
+
+// MARK: - BounceAnimation
+// Subtle one-shot scale animation for the save indicator dots/checks.
+// Triggers every time the view first appears with the modifier, so
+// we tie it to a @State that flips on every state change.
+struct BounceAnimation: ViewModifier {
+    @State private var scale: CGFloat = 0.5
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(scale)
+            .onAppear {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.5)) {
+                    scale = 1.0
+                }
+            }
     }
 }

@@ -78,6 +78,30 @@ def list_markdown_files(project_id):
         [f for f in project_dir.glob("*.md") if f.is_file()],
         key=lambda p: natural_sort_key(p.stem)
     )
+    # If the project has an explicit chapter order (set via the
+    # /reorder endpoint), use that instead of natural sort. The order
+    # list is sanitized; missing files are appended at the end.
+    try:
+        ctx = get_project_context(project_id)
+        order = ctx.get("chapter_order")
+    except Exception:
+        order = None
+    if isinstance(order, list) and order:
+        stems = [f.stem for f in files]
+        present = {s: f for s, f in zip(stems, files)}
+        ordered = []
+        for name in order:
+            # Match either bare name or name with .md
+            for stem, file in present.items():
+                if stem == name or stem == name + ".md" or name == stem + ".md":
+                    if file not in ordered:
+                        ordered.append(file)
+                    break
+        # Append any files not in the explicit order
+        for f in files:
+            if f not in ordered:
+                ordered.append(f)
+        files = ordered
     return [
         {"name": f.stem, "path": str(f), "modified": os.path.getmtime(f), "size": os.path.getsize(f)}
         for f in files
@@ -2216,6 +2240,47 @@ def rename_chapter(project_id, chapter_name):
         return {"error": f"Chapter '{new_name}' already exists"}, 409
     old_path.rename(new_path)
     return {"name": new_name, "path": str(new_path)}
+
+
+@app.route("/api/projects/<project_id>/chapters/reorder", methods=["POST"])
+def reorder_chapters(project_id):
+    """Reorder the chapter list for a project. Body: { order: ["chapter-01", "chapter-02", ...] }
+
+    Implementation: renames the files with a numeric prefix to enforce the
+    new order. The "natural" chapter name is preserved by stripping the
+    prefix after the rename. This way the file names stay clean
+    (chapter-01.md, chapter-02.md, etc.) and the order is encoded in
+    the prefix that we then strip.
+
+    Actually — a simpler approach: use a hidden `.order.json` that maps
+    custom names to display positions. But that breaks the existing
+    pattern of "the filename is the chapter name". So instead, we
+    actually rename the files to enforce the order: pre-pend an order
+    prefix, then on read, sort by that prefix.
+
+    Simplest of all: just sort by file creation/modification time. But
+    that requires trusting the filesystem.
+
+    Cleanest: store the order in project context. The file names stay
+    as the user named them. The order is a separate list in
+    .quill_context.json.
+    """
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    data = safe_json()
+    order = data.get("order")
+    if not isinstance(order, list) or not all(isinstance(x, str) for x in order):
+        return {"error": "order must be a list of chapter names"}, 400
+    # Sanitize each name
+    safe = []
+    for n in order:
+        s = re.sub(r"[^A-Za-z0-9_\-]", "-", n)[:80]
+        if s and s not in safe:
+            safe.append(s)
+    ctx = get_project_context(project_id)
+    ctx["chapter_order"] = safe
+    save_project_context(project_id, ctx)
+    return {"ok": True, "order": safe}
 
 
 @app.route("/api/rename", methods=["POST"])

@@ -131,13 +131,26 @@ struct SidebarView: View {
                         .foregroundColor(textMuted)
                         .padding(.horizontal, 12)
                 } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 2) {
-                            ForEach(state.chapters) { chapter in
-                                chapterButton(chapter)
-                            }
+                    // List gives us native drag-to-reorder via .onMove.
+                    // We style it to match the rest of the sidebar.
+                    List {
+                        ForEach(state.chapters) { chapter in
+                            chapterRow(chapter)
+                                .listRowBackground(
+                                    state.currentChapter?.id == chapter.id
+                                        ? accent.opacity(0.12)
+                                        : bg
+                                )
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets(top: 1, leading: 4, bottom: 1, trailing: 4))
+                        }
+                        .onMove { from, to in
+                            Task { await state.reorderChapters(from: from, to: to) }
                         }
                     }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .background(bg)
                     .frame(maxHeight: viewMode == .corkboard ? 0 : 180)
                     .opacity(viewMode == .corkboard ? 0 : 1)
                 }
@@ -258,37 +271,39 @@ struct SidebarView: View {
         .padding(.horizontal, 6)
     }
 
-    private func chapterButton(_ chapter: Chapter) -> some View {
-        Button(action: {
-            Task { await state.selectChapter(chapter) }
-        }) {
-            HStack(spacing: 6) {
-                Image(systemName: "doc.text")
-                    .font(.system(size: 10))
-                    .foregroundColor(state.currentChapter?.id == chapter.id ? accent : textMuted)
-                    .frame(width: 14)
-                Text(chapter.name)
-                    .font(.system(size: 12))
-                    .foregroundColor(state.currentChapter?.id == chapter.id ? textPrimary : textSecondary)
-                    .lineLimit(1)
-                Spacer()
-                // Word-count badge — rough estimate from file size
-                if chapter.size > 0 {
-                    Text(Self.estimateWords(chapter.size))
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundColor(textMuted.opacity(0.7))
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(bg.opacity(0.5))
-                        .cornerRadius(2)
-                }
+    /// Chapter row used inside the drag-to-reorder List. Looks the same
+    /// as the old chapterButton but uses a `.onTapGesture` instead of
+    /// wrapping in a Button (which swallows drag gestures in List).
+    @ViewBuilder
+    private func chapterRow(_ chapter: Chapter) -> some View {
+        let isCurrent = state.currentChapter?.id == chapter.id
+        HStack(spacing: 6) {
+            Image(systemName: "doc.text")
+                .font(.system(size: 10))
+                .foregroundColor(isCurrent ? accent : textMuted)
+                .frame(width: 14)
+            Text(chapter.name)
+                .font(.system(size: 12))
+                .foregroundColor(isCurrent ? textPrimary : textSecondary)
+                .lineLimit(1)
+            Spacer()
+            // Word-count badge — rough estimate from file size
+            if chapter.size > 0 {
+                Text(Self.estimateWords(chapter.size))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(textMuted.opacity(0.7))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(bg.opacity(0.5))
+                    .cornerRadius(2)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(state.currentChapter?.id == chapter.id ? accent.opacity(0.12) : Color.clear)
-            .cornerRadius(4)
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            Task { await state.selectChapter(chapter) }
+        }
         .contextMenu {
             Button("Rename…") {
                 renameTarget = .chapter(chapter)
