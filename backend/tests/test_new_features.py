@@ -1,5 +1,5 @@
 """
-Quill new features — tests for ePub/HTML export, scenes, codex, stats, synopsis.
+Quill new features — tests for ePub/HTML export, codex, stats, synopsis.
 """
 import pytest
 import json
@@ -108,99 +108,6 @@ class TestEpubExport:
         else:
             # Pandoc missing — that's OK
             assert r.status_code == 500
-
-
-# ---- Scenes (chapter sub-units) --------------------------------------------
-
-class TestScenes:
-    def test_create_scene(self, client):
-        proj = client.post("/api/projects", json={"name": "Scene Test"}).get_json()
-        client.post(f"/api/projects/{proj['id']}/chapters", json={"name": "chapter-1"})
-
-        r = client.post(
-            f"/api/projects/{proj['id']}/chapters/chapter-1/scenes",
-            json={"name": "scene-1"}
-        )
-        assert r.status_code == 200
-        data = r.get_json()
-        assert data["name"] == "scene-1"
-        assert data["chapter"] == "chapter-1"
-
-    def test_list_scenes(self, client):
-        proj = client.post("/api/projects", json={"name": "Scene List Test"}).get_json()
-        client.post(f"/api/projects/{proj['id']}/chapters", json={"name": "chapter-1"})
-        for sn in ["scene-1", "scene-2", "scene-3"]:
-            client.post(f"/api/projects/{proj['id']}/chapters/chapter-1/scenes", json={"name": sn})
-
-        r = client.get(f"/api/projects/{proj['id']}/chapters/chapter-1/scenes")
-        scenes = r.get_json()
-        assert len(scenes) == 3
-        names = [s["name"] for s in scenes]
-        assert names == ["scene-1", "scene-2", "scene-3"]
-
-    def test_scene_content_crud(self, client):
-        proj = client.post("/api/projects", json={"name": "Scene CRUD"}).get_json()
-        client.post(f"/api/projects/{proj['id']}/chapters", json={"name": "chapter-1"})
-        client.post(f"/api/projects/{proj['id']}/chapters/chapter-1/scenes", json={"name": "scene-1"})
-
-        # Update content
-        r = client.put(
-            f"/api/projects/{proj['id']}/chapters/chapter-1/scenes/scene-1/content",
-            json={"content": "Iris walked into the dark."}
-        )
-        assert r.status_code == 200
-
-        # Read it back
-        r = client.get(f"/api/projects/{proj['id']}/chapters/chapter-1/scenes/scene-1/content")
-        assert "Iris walked into the dark" in r.get_json()["content"]
-
-        # Delete
-        r = client.delete(f"/api/projects/{proj['id']}/chapters/chapter-1/scenes/scene-1")
-        assert r.status_code == 200
-
-    def test_duplicate_scene_409(self, client):
-        proj = client.post("/api/projects", json={"name": "Dup Scene"}).get_json()
-        client.post(f"/api/projects/{proj['id']}/chapters", json={"name": "ch1"})
-        client.post(f"/api/projects/{proj['id']}/chapters/ch1/scenes", json={"name": "scene-1"})
-        r = client.post(f"/api/projects/{proj['id']}/chapters/ch1/scenes", json={"name": "scene-1"})
-        assert r.status_code == 409
-
-    def test_compile_includes_scenes_as_subsections(self, client):
-        proj = client.post("/api/projects", json={"name": "Compile Scenes Test"}).get_json()
-        client.put(f"/api/projects/{proj['id']}/settings", json={"title": "Test", "author": "T"})
-        client.post(f"/api/projects/{proj['id']}/chapters", json={"name": "chapter-1"})
-        client.put(f"/api/projects/{proj['id']}/chapters/chapter-1/content", json={
-            "content": "# Chapter 1: The Beginning\n\nThe story starts."
-        })
-        client.post(f"/api/projects/{proj['id']}/chapters/chapter-1/scenes", json={"name": "scene-1"})
-        client.put(f"/api/projects/{proj['id']}/chapters/chapter-1/scenes/scene-1/content", json={
-            "content": "# Opening Scene\n\nFirst scene content."
-        })
-        client.post(f"/api/projects/{proj['id']}/chapters/chapter-1/scenes", json={"name": "scene-2"})
-        client.put(f"/api/projects/{proj['id']}/chapters/chapter-1/scenes/scene-2/content", json={
-            "content": "# Second Scene\n\nMore content."
-        })
-
-        r = client.get(f"/api/projects/{proj['id']}/compile")
-        content = r.get_json()["content"]
-        # Chapter heading
-        assert "The Beginning" in content
-        # Scene headings promoted to ## (subsections)
-        assert "## Opening Scene" in content
-        assert "## Second Scene" in content
-        # Scene content is included
-        assert "First scene content" in content
-        assert "More content" in content
-
-    def test_chapter_listing_excludes_subdirectories(self, client):
-        """The /api/projects/<id>/chapters endpoint should not list dirs as chapters."""
-        proj = client.post("/api/projects", json={"name": "List Clean Test"}).get_json()
-        client.post(f"/api/projects/{proj['id']}/chapters", json={"name": "ch1"})
-        client.post(f"/api/projects/{proj['id']}/chapters/ch1/scenes", json={"name": "scene-1"})
-        r = client.get(f"/api/projects/{proj['id']}/chapters")
-        chapters = r.get_json()
-        assert len(chapters) == 1
-        assert chapters[0]["name"] == "ch1"
 
 
 # ---- Story Bible / Codex --------------------------------------------------
@@ -410,8 +317,8 @@ if __name__ == "__main__":
 # ---- Generic file rename ----------------------------------------------------
 
 class TestGenericRename:
-    """Tests for the new /api/rename endpoint used by the app for scene renames
-    and any other file in the project tree."""
+    """Tests for the new /api/rename endpoint used by the app for chapter
+    renames and any other file in the project tree."""
 
     def test_rename_chapter_file(self, client):
         r = client.post("/api/projects", json={"name": "rename-test"})

@@ -55,7 +55,6 @@ def build_vellum_docx(
         "number": int,
         "title": str,
         "content": str,  # the chapter's markdown body
-        "scenes": [{"name": str, "content": str}] (optional)
     }
 
     Returns the .docx as bytes.
@@ -163,12 +162,6 @@ def build_vellum_docx(
         # our heading above) and convert markdown to Vellum-friendly paragraphs
         body = _strip_leading_heading(ch.get("content", ""), level=1)
         _emit_chapter_body(doc, body)
-
-        # Scenes (if present) — sub-chapters become Heading 2 subsections
-        for scene in ch.get("scenes", []):
-            sub = doc.add_paragraph(style="Heading 2")
-            sub.add_run(scene.get("name", "Scene"))
-            _emit_chapter_body(doc, scene.get("content", ""))
 
     # Save to bytes
     buf = BytesIO()

@@ -155,37 +155,6 @@ struct SidebarView: View {
                     .opacity(viewMode == .corkboard ? 0 : 1)
                 }
 
-                // Scenes (only when a chapter is selected AND viewMode is not corkboard)
-                if state.currentChapter != nil && viewMode != .corkboard {
-                    Divider().background(border)
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("SCENES")
-                                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                .foregroundColor(textMuted)
-                            Spacer()
-                            Button(action: {
-                                Task { await state.createScene(name: "scene-\(state.scenes.count + 1)") }
-                            }) {
-                                Image(systemName: "plus")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(textMuted)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.top, 8)
-
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 2) {
-                                ForEach(state.scenes) { scene in
-                                    sceneButton(scene)
-                                }
-                            }
-                        }
-                        .frame(maxHeight: 100)
-                    }
-                }
                 Spacer()
             }
         }
@@ -193,53 +162,6 @@ struct SidebarView: View {
         .sheet(isPresented: $showRenameSheet) {
             renameSheet
         }
-    }
-
-    private func sceneButton(_ scene: Scene) -> some View {
-        Button(action: {
-            Task { await state.selectScene(scene) }
-        }) {
-            HStack(spacing: 6) {
-                Image(systemName: "rectangle")
-                    .font(.system(size: 9))
-                    .foregroundColor(state.currentScene?.id == scene.id ? accent : textMuted)
-                    .frame(width: 14)
-                Text(scene.name)
-                    .font(.system(size: 11))
-                    .foregroundColor(state.currentScene?.id == scene.id ? textPrimary : textSecondary)
-                    .lineLimit(1)
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(state.currentScene?.id == scene.id ? accent.opacity(0.12) : Color.clear)
-            .cornerRadius(4)
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Button("Rename…") {
-                renameTarget = .scene(scene)
-                renameValue = scene.name
-                showRenameSheet = true
-            }
-            Button("Duplicate") {
-                Task { await state.duplicateScene(scene) }
-            }
-            Divider()
-            if let path = scenePath(scene) {
-                Button("Reveal in Finder") {
-                    AppCommandsState.shared.revealInFinder(path)
-                }
-                Button("Open in Terminal") {
-                    AppCommandsState.shared.openInTerminal(path)
-                }
-                Divider()
-            }
-            Button("Delete", role: .destructive) {
-                Task { await state.deleteScene(scene) }
-            }
-        }
-        .padding(.horizontal, 6)
     }
 
     private func projectButton(_ project: Project) -> some View {
@@ -394,16 +316,10 @@ struct SidebarView: View {
         return "\(BackendService.shared.baseDir)/\(project.id)/\(chapter.name).md"
     }
 
-    private func scenePath(_ scene: Scene) -> String? {
-        guard let project = state.currentProject, let chapter = state.currentChapter else { return nil }
-        return "\(BackendService.shared.baseDir)/\(project.id)/\(chapter.name)/\(scene.name).md"
-    }
-
     // MARK: - Rename sheet state
 
     private enum RenameTarget {
         case chapter(Chapter)
-        case scene(Scene)
     }
     @State private var renameTarget: RenameTarget?
     @State private var renameValue: String = ""
@@ -431,8 +347,6 @@ struct SidebarView: View {
                         switch target {
                         case .chapter(let ch):
                             await state.renameChapter(ch, to: name)
-                        case .scene(let sc):
-                            await state.renameScene(sc, to: name)
                         case .none:
                             break
                         }

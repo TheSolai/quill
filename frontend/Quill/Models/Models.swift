@@ -136,27 +136,6 @@ struct ProjectSettings: Codable {
     }
 }
 
-// MARK: - Scene (sub-chapter)
-struct Scene: Identifiable, Codable, Hashable {
-    var id: String { name }
-    let name: String
-    let path: String
-    let modified: Double
-    let size: Int
-}
-
-struct SceneContent: Codable {
-    let name: String
-    let content: String
-    let path: String
-}
-
-struct SceneCreateResponse: Codable {
-    let name: String
-    let path: String?
-    let chapter: String?
-}
-
 // MARK: - Story Bible / Codex
 // Structured + freeform fields. The freeform text fields are kept for the
 // prose system prompt (which can ingest them as-is). The structured list
@@ -584,7 +563,7 @@ class AppState: ObservableObject {
     private var lastSavedContent: String = ""
 
     init() {
-        // Listen for Cmd+S from the menu bar — save the current chapter/scene
+        // Listen for Cmd+S from the menu bar — save the current chapter
         // from anywhere in the app.
         NotificationCenter.default.addObserver(
             forName: .saveDocument,
@@ -749,8 +728,6 @@ class AppState: ObservableObject {
         currentProject = project
         chapterContent = ""
         currentChapter = nil
-        currentScene = nil
-        sceneContent = ""
         autosaveTask?.cancel()
         trailingSaveTask?.cancel()
         saveState = .idle
@@ -901,8 +878,7 @@ class AppState: ObservableObject {
             try? await Task.sleep(nanoseconds: AppState.autosaveMaxDelayNanos)
             guard !Task.isCancelled else { return }
             guard let self = self else { return }
-            let currentContent = self.currentScene != nil ? self.sceneContent : self.chapterContent
-            if currentContent == self.lastSavedContent { return }
+            if self.chapterContent == self.lastSavedContent { return }
             if self.saveState.isError || self.saveState == .dirty {
                 await self.saveNow()
             }
@@ -921,10 +897,10 @@ class AppState: ObservableObject {
         trailingSaveTask = nil
     }
 
-    /// Save the current chapter (or scene) immediately. Updates saveState
-    /// throughout the save so the UI can show a saving/saved indicator.
-    /// Concurrent saves are guarded — if a save is already in flight, the
-    /// call coalesces into a single save that picks up the latest content.
+    /// Save the current chapter immediately. Updates saveState throughout
+    /// the save so the UI can show a saving/saved indicator. Concurrent
+    /// saves are guarded — if a save is already in flight, the call
+    /// coalesces into a single save that picks up the latest content.
     func saveNow() async {
         guard let chapter = currentChapter, let project = currentProject else { return }
         // If a save is already in progress, wait for it to complete (max 10s)
@@ -938,13 +914,11 @@ class AppState: ObservableObject {
             }
             // After the in-flight save completes, the content may already match
             // what's on disk — only re-save if the user typed during the wait.
-            let currentContent = currentScene != nil ? sceneContent : chapterContent
-            if currentContent == lastSavedContent { return }
+            if chapterContent == lastSavedContent { return }
         }
         // No-op short-circuit: if the content hasn't changed since the last
         // save, don't burn a network round-trip.
-        let currentContent = currentScene != nil ? sceneContent : chapterContent
-        if currentContent == lastSavedContent, !saveState.isError { return }
+        if chapterContent == lastSavedContent, !saveState.isError { return }
         saveInFlight = true
         defer { saveInFlight = false }
         // Do NOT cancel autosaveTask/trailingSaveTask here — this method
@@ -955,28 +929,20 @@ class AppState: ObservableObject {
         let previousState = saveState
         // Capture the content we're about to save so we can detect later
         // changes that happened during the save.
-        let contentToSave = currentScene != nil ? sceneContent : chapterContent
+        let contentToSave = chapterContent
         lastSavedContent = contentToSave
         saveState = .saving
         do {
-            if let scene = currentScene {
-                try await BackendService.shared.put(
-                    "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(scene.name)/content",
-                    body: ["content": contentToSave]
-                )
-            } else {
-                try await BackendService.shared.put(
-                    "/api/projects/\(project.id)/chapters/\(chapter.name)/content",
-                    body: ["content": contentToSave]
-                )
-            }
+            try await BackendService.shared.put(
+                "/api/projects/\(project.id)/chapters/\(chapter.name)/content",
+                body: ["content": contentToSave]
+            )
             saveState = .saved
-            statusMessage = currentScene != nil ? "Scene saved" : "Saved"
+            statusMessage = "Saved"
             // If the user typed during the save, the content will now differ
             // from what we just persisted. Re-mark dirty so the next autosave
             // picks up the new changes.
-            let currentContent = currentScene != nil ? sceneContent : chapterContent
-            if currentContent != contentToSave {
+            if chapterContent != contentToSave {
                 saveState = .dirty
                 scheduleAutosave()
             } else {
@@ -1058,7 +1024,7 @@ class AppState: ObservableObject {
         await saveNow()
     }
 
-    /// Returns the on-disk path of the current chapter (or scene) — used for
+    /// Returns the on-disk path of the current chapter — used for
     /// Reveal in Finder, Recent Files, Save As, etc.
     func currentChapterURL() -> String? {
         guard let project = currentProject, let chapter = currentChapter else { return nil }
@@ -1077,7 +1043,7 @@ class AppState: ObservableObject {
                 "/api/projects/\(project.id)/chapters", body: ["name": safeName]
             )
             // Copy current content to the new chapter
-            let content = currentScene != nil ? sceneContent : chapterContent
+            let content = chapterContent
             try await BackendService.shared.put(
                 "/api/projects/\(project.id)/chapters/\(safeName)/content",
                 body: ["content": content]
@@ -1204,149 +1170,6 @@ class AppState: ObservableObject {
         } catch {
             backendError = error.localizedDescription
             ToastCenter.shared.postError("Duplicate failed: \(error.localizedDescription)")
-        }
-    }
-
-    /// Rename a scene (file in chapter's scenes subdir).
-    func renameScene(_ scene: Scene, to newName: String) async {
-        guard let project = currentProject, let chapter = currentChapter else { return }
-        let safe = newName.trimmingCharacters(in: .whitespaces)
-        guard !safe.isEmpty, safe != scene.name else { return }
-        // Use the generic file-rename endpoint
-        let oldPath = "\(project.id)/\(chapter.name)/\(scene.name).md"
-        let newPath = "\(project.id)/\(chapter.name)/\(safe).md"
-        do {
-            struct RenameOK: Codable { let ok: Bool?; let `from`: String?; let to: String? }
-            let _: RenameOK = try await BackendService.shared.post(
-                "/api/rename",
-                body: ["from": oldPath, "to": newPath]
-            )
-            let wasCurrent = currentScene?.id == scene.id
-            await loadScenes()
-            if wasCurrent, let renamed = scenes.first(where: { $0.name == safe }) {
-                await selectScene(renamed)
-            }
-            ToastCenter.shared.postSuccess("Renamed to \(safe).md")
-        } catch {
-            ToastCenter.shared.postError("Scene rename failed: \(error.localizedDescription)")
-        }
-    }
-
-    /// Duplicate a scene.
-    func duplicateScene(_ scene: Scene) async {
-        guard let project = currentProject, let chapter = currentChapter else { return }
-        let baseName = scene.name + "-copy"
-        var newName = baseName
-        var counter = 2
-        while scenes.contains(where: { $0.name == newName }) {
-            newName = "\(baseName)-\(counter)"
-            counter += 1
-        }
-        do {
-            let _: SceneCreateResponse = try await BackendService.shared.post(
-                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes",
-                body: ["name": newName]
-            )
-            let source: SceneContent = try await BackendService.shared.get(
-                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(scene.name)/content"
-            )
-            try await BackendService.shared.put(
-                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(newName)/content",
-                body: ["content": source.content]
-            )
-            await loadScenes()
-            if let dup = scenes.first(where: { $0.name == newName }) {
-                await selectScene(dup)
-            }
-            ToastCenter.shared.postSuccess("Duplicated as \(newName).md")
-        } catch {
-            backendError = error.localizedDescription
-            ToastCenter.shared.postError("Duplicate failed: \(error.localizedDescription)")
-        }
-    }
-
-    // ---- Scenes (sub-chapters) ----------------------------------------
-
-    @Published var scenes: [Scene] = []
-    @Published var currentScene: Scene?
-    @Published var sceneContent: String = ""
-
-    func loadScenes() async {
-        guard let project = currentProject, let chapter = currentChapter else {
-            scenes = []
-            return
-        }
-        do {
-            scenes = try await BackendService.shared.get(
-                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes"
-            )
-        } catch {
-            scenes = []
-            backendError = error.localizedDescription
-        }
-    }
-
-    func selectScene(_ scene: Scene) async {
-        guard let project = currentProject, let chapter = currentChapter else { return }
-        // If we're switching scenes with unsaved work, save the old scene first
-        if currentScene != nil, isDirty {
-            await saveNow()
-        }
-        do {
-            let content: SceneContent = try await BackendService.shared.get(
-                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(scene.name)/content"
-            )
-            currentScene = scene
-            sceneContent = content.content
-            autosaveTask?.cancel()
-            trailingSaveTask?.cancel()
-            saveState = .idle
-            lastSavedContent = content.content
-        } catch {
-            backendError = error.localizedDescription
-        }
-    }
-
-    func saveCurrentScene() async {
-        guard let project = currentProject, let chapter = currentChapter, let scene = currentScene else { return }
-        do {
-            try await BackendService.shared.put(
-                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(scene.name)/content",
-                body: ["content": sceneContent]
-            )
-            statusMessage = "Scene saved"
-        } catch {
-            backendError = error.localizedDescription
-        }
-    }
-
-    func createScene(name: String) async {
-        guard let project = currentProject, let chapter = currentChapter else { return }
-        do {
-            let _: [String: String] = try await BackendService.shared.post(
-                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes",
-                body: ["name": name]
-            )
-            await loadScenes()
-        } catch {
-            backendError = error.localizedDescription
-        }
-    }
-
-    func deleteScene(_ scene: Scene) async {
-        guard let project = currentProject, let chapter = currentChapter else { return }
-        do {
-            try await BackendService.shared.delete(
-                "/api/projects/\(project.id)/chapters/\(chapter.name)/scenes/\(scene.name)"
-            )
-            // If the deleted scene was the current one, clear it from the editor
-            if currentScene?.id == scene.id {
-                currentScene = nil
-                sceneContent = ""
-            }
-            await loadScenes()
-        } catch {
-            backendError = error.localizedDescription
         }
     }
 
@@ -1687,10 +1510,7 @@ class AppState: ObservableObject {
     }
 
     func updateWordCount() {
-        // Count words from whichever content is currently active. If a
-        // scene is selected, count its content; otherwise the chapter's.
-        let source = currentScene != nil ? sceneContent : chapterContent
-        let words = source
+        let words = chapterContent
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
         wordCount = words.count

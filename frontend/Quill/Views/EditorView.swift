@@ -53,14 +53,6 @@ struct EditorView: View {
                             .font(.system(size: 10, design: .monospaced))
                             .foregroundColor(textMuted)
                     }
-                    if let scene = state.currentScene {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 10))
-                            .foregroundColor(textMuted)
-                        Text(scene.name)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(accentDim)
-                    }
                 } else {
                     Text("No chapter open")
                         .font(.system(size: 13))
@@ -256,10 +248,9 @@ struct EditorView: View {
     @MainActor
     private func runInlineFix(snippet: String, range: NSRange) async {
         guard !snippet.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        // Capture the current chapter/scene so we can detect a switch mid-fix
+        // Capture the current chapter so we can detect a switch mid-fix
         // and refuse to apply the result to the wrong place.
         let chapterAtStart = state.currentChapter
-        let sceneAtStart = state.currentScene
         let contentAtStart = activeContent
 
         isFixingInline = true
@@ -276,9 +267,8 @@ struct EditorView: View {
                 instruction: "fix typos and grammar",
                 slotId: nil  // let the backend pick the best small local slot
             )
-            // Bail if the user switched chapters/scenes while the API was in flight
-            guard state.currentChapter?.id == chapterAtStart?.id,
-                  state.currentScene?.id == sceneAtStart?.id else {
+            // Bail if the user switched chapters while the API was in flight
+            guard state.currentChapter?.id == chapterAtStart?.id else {
                 inlineFixStatus = "Fix discarded (chapter switched)"
                 isFixingInline = false
                 let status = inlineFixStatus
@@ -295,11 +285,7 @@ struct EditorView: View {
             }
             let newContent = mutable as String
             // Update the binding (this fires onChange → markDirty)
-            if state.currentScene != nil {
-                state.sceneContent = newContent
-            } else {
-                state.chapterContent = newContent
-            }
+            state.chapterContent = newContent
             state.markDirty()
             state.updateWordCount()
             inlineFixRange = NSRange(location: safeRange.location, length: (result.text as NSString).length)
@@ -470,7 +456,7 @@ struct EditorView: View {
                 }
             )
 
-            if state.statusMessage == "Saved" || state.statusMessage == "Scene saved" || state.statusMessage == "Story Bible saved" {
+            if state.statusMessage == "Saved" || state.statusMessage == "Story Bible saved" {
                 HStack(spacing: 4) {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundColor(accent)
@@ -528,22 +514,14 @@ struct EditorView: View {
     // MARK: - Helpers
 
     private var activeContent: String {
-        // Scene is the "active" content if a scene is selected
-        if state.currentScene != nil {
-            return state.sceneContent
-        }
-        return state.chapterContent
+        state.chapterContent
     }
 
     private var currentTextBinding: Binding<String> {
         Binding(
             get: { activeContent },
             set: { newValue in
-                if state.currentScene != nil {
-                    state.sceneContent = newValue
-                } else {
-                    state.chapterContent = newValue
-                }
+                state.chapterContent = newValue
             }
         )
     }

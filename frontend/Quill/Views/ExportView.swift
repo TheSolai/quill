@@ -54,7 +54,7 @@ struct ExportView: View {
             case .html: return "Standalone web page, styled for reading"
             case .epub: return "E-book format for Kindle, iBooks, etc."
             case .rtf: return "Rich Text Format (universal)"
-            case .opml: return "Outline editor format (chapters + scenes)"
+            case .opml: return "Outline editor format (chapters only)"
             case .bundle: return "ZIP with all chapters + manifest.json"
             }
         }

@@ -1383,7 +1383,7 @@ def _handle_email_intent(intent: dict, project_id: str) -> dict:
 # Cues that suggest the user wants prose written into a chapter.
 # Verb list: write, draft, fill, generate, create, compose, expand, continue,
 #   make, start, begin, do, build, write out, knock out
-# Chapter noun: chapter, scene, opening, next paragraph/scene, continuation.
+# Chapter noun: chapter, opening, next paragraph, continuation.
 # Typo tolerance: chapt?er, chpter, chpater, etc. all match via the
 # CHAPTER_NOUN pattern below.
 VERB_CUE = (
@@ -1400,8 +1400,7 @@ VERB_CUE = (
 # chap + 0-3 chars + er matches: chapter, chaptr, chaper, chapeter, etc.
 CHAPTER_NOUN = (
     r"\b(?:chap[a-z]{0,3}er\b|chpter|chapt?er\b|chapt?re|chaptr|chpater|"
-    r"sce?ne?\b|scence|sceen|"
-    r"opening|next\s+paragraph|next\s+scene|continuation)\b"
+    r"opening|next\s+paragraph|continuation)\b"
 )
 # Allow any short word(s) between verb and noun (handles "draft this chapter",
 # "write me chapter 3", etc.)
@@ -1434,7 +1433,6 @@ def _extract_chapter_write_intent(text: str) -> Optional[dict]:
       - Typos: "make chapeter 1", "write chpter 2"
       - Reverse: "chapter 3 please", "chapter 1 — write it"
       - Vague: "write the next thing", "continue", "expand"
-      - Scene: "write scene 2", "draft opening scene"
 
     Skips:
       - Meta-instructions like "use the write_chapter tool to..."
@@ -1479,19 +1477,8 @@ def _extract_chapter_write_intent(text: str) -> Optional[dict]:
             if num.lower() == "s":
                 return {"action": "write_chapter", "target": "current"}
             target_chapter = f"chapter-{num.lower()}"
-    if not target_chapter:
-        m_scene = re.search(
-            r"\bsce?ne?\b[\s\-_]*(\d+|[a-z]+)\b",
-            text,
-            re.IGNORECASE,
-        )
-        if m_scene:
-            num = m_scene.group(1)
-            if num.lower() == "s":
-                return {"action": "write_chapter", "target": "current"}
-            target_chapter = f"scene-{num.lower() if not num.isdigit() else int(num):02d}"
     if not target_chapter and re.search(
-        r"\b(this|current|next|new)\s+(?:chapter|scene|one|two|three|four|five|six|seven|eight|nine|ten)\b",
+        r"\b(this|current|next|new)\s+(?:chapter|one|two|three|four|five|six|seven|eight|nine|ten)\b",
         text,
         re.IGNORECASE,
     ):
@@ -1907,19 +1894,10 @@ def export_vellum_docx(project_id):
         # Strip the leading H1 line from content (we add it as Heading 1)
         content = re.sub(r"^#\s+.+?\n", "", content, count=1).strip()
 
-        # Scenes (if any)
-        scene_dir = project_dir / f.stem
-        scenes = []
-        if scene_dir.is_dir():
-            for sf in sorted(scene_dir.glob("scene-*.md"), key=lambda p: natural_sort_key(p.stem)):
-                sc = sf.read_text(encoding="utf-8")
-                scenes.append({"name": sf.stem, "content": sc})
-
         chapters_data.append({
             "number": num,
             "title": ch_title,
             "content": content,
-            "scenes": scenes,
         })
 
     docx_bytes = _vellum_docx.build_vellum_docx(
@@ -1963,7 +1941,7 @@ def export_rtf(project_id):
 
 @app.route("/api/projects/<project_id>/export/opml", methods=["GET"])
 def export_opml(project_id):
-    """Export project as OPML outline (chapters + scenes)."""
+    """Export project as OPML outline (chapters only)."""
     project_dir = get_project_dir(project_id)
     ctx = get_project_context(project_id)
     title = ctx.get("title", project_id.replace("-", " ").title())
@@ -1988,13 +1966,7 @@ def export_opml(project_id):
             ch_title = title_m.group(1).strip()
         elif ch_num:
             ch_title = f"Chapter {ch_num}"
-        out.append(f'    <outline text="{_xml_escape(ch_title)}">')
-        # List scenes
-        scene_dir = project_dir / f.stem
-        if scene_dir.is_dir():
-            for sf in sorted(scene_dir.glob("scene-*.md"), key=lambda p: natural_sort_key(p.stem)):
-                out.append(f'      <outline text="{_xml_escape(sf.stem.replace("-", " ").title())}"/>')
-        out.append('    </outline>')
+        out.append(f'    <outline text="{_xml_escape(ch_title)}"/>')
     out.append('  </body>')
     out.append('</opml>')
     safe = _safe_title(project_id)
@@ -2285,11 +2257,11 @@ def reorder_chapters(project_id):
 
 @app.route("/api/rename", methods=["POST"])
 def rename_generic():
-    """Generic file rename used by the app for scene renames and any
-    other file in the project tree. The path is relative to BASE_DIR.
+    """Generic file rename used by the app for any file in the project
+    tree. The path is relative to BASE_DIR.
 
     Body:
-        { "from": "project-id/chapter/scene.md", "to": "project-id/chapter/scene-2.md" }
+        { "from": "project-id/chapter.md", "to": "project-id/chapter-renamed.md" }
     """
     data = safe_json()
     raw_from = (data.get("from") or "").strip()
@@ -2350,7 +2322,8 @@ def compile_book(project_id):
     body = []
     included = []
     for ch in chapters:
-        # Skip chapter subdirectories at the top level — they contain scenes
+        # Skip chapter subdirectories at the top level (defense in depth —
+        # the glob only matches .md files, but be safe).
         if ch.is_dir():
             continue
         content = ch.read_text(encoding="utf-8")
@@ -2362,22 +2335,6 @@ def compile_book(project_id):
         if len(non_heading_lines) == 0:
             # Empty chapter (just heading) — skip
             continue
-
-        # Append scenes (sub-chapter files in chapter-NN/) as H2 sub-sections
-        chapter_name = ch.stem
-        scene_dir = project_dir / chapter_name
-        if scene_dir.is_dir():
-            scenes = sorted(scene_dir.glob("scene-*.md"), key=lambda p: natural_sort_key(p.stem))
-            for scene_path in scenes:
-                scene_content = scene_path.read_text(encoding="utf-8")
-                # Promote scene's # heading to ## (subsection of chapter)
-                scene_lines = scene_content.split("\n", 1)
-                if scene_lines and scene_lines[0].startswith("# "):
-                    scene_title = scene_lines[0][2:].strip()
-                    rest = scene_lines[1] if len(scene_lines) > 1 else ""
-                    content += f"\n\n## {scene_title}\n{rest}"
-                else:
-                    content += f"\n\n{scene_content}"
 
         body.append(content)
         included.append(ch)
@@ -2746,90 +2703,6 @@ def update_settings(project_id):
             ctx[key] = data[key]
     save_project_context(project_id, ctx)
     return ctx
-
-
-# ---- Scenes (sub-chapters within a chapter) ---------------------------------
-
-def get_chapter_dir(project_id: str, chapter_name: str) -> Path:
-    """Get the directory for a chapter's scenes: <project>/chapter-NN/."""
-    return get_project_dir(project_id) / chapter_name
-
-
-def list_scenes(project_id: str, chapter_name: str):
-    """List scene files for a chapter. Stored as <project>/chapter-NN/scene-NN.md."""
-    chapter_dir = get_chapter_dir(project_id, chapter_name)
-    if not chapter_dir.exists():
-        return []
-    files = sorted(chapter_dir.glob("scene-*.md"), key=lambda p: natural_sort_key(p.stem))
-    return [
-        {"name": f.stem, "path": str(f), "modified": os.path.getmtime(f), "size": os.path.getsize(f)}
-        for f in files
-    ]
-
-
-@app.route("/api/projects/<project_id>/chapters/<chapter_name>/scenes", methods=["GET"])
-def get_scenes(project_id, chapter_name):
-    if not validate_project_id(project_id):
-        return {"error": "invalid project id"}, 400
-    safe_chapter = safe_name(chapter_name.replace(".md", ""), max_len=80)
-    if not safe_chapter or ".." in safe_chapter:
-        return {"error": "invalid chapter name"}, 400
-    # The chapter file must exist for scenes to be valid
-    project_dir = get_project_dir(project_id)
-    if not (project_dir / f"{safe_chapter}.md").exists():
-        return {"error": f"Chapter '{safe_chapter}' not found"}, 404
-    return list_scenes(project_id, safe_chapter)
-
-
-@app.route("/api/projects/<project_id>/chapters/<chapter_name>/scenes", methods=["POST"])
-def create_scene(project_id, chapter_name):
-    if not validate_project_id(project_id):
-        return {"error": "invalid project id"}, 400
-    safe_chapter = safe_name(chapter_name.replace(".md", ""), max_len=80)
-    if not safe_chapter or ".." in safe_chapter:
-        return {"error": "invalid chapter name"}, 400
-    data = safe_json()
-    raw_name = data.get("name") or "scene-1"
-    safe = safe_name(raw_name, fallback="scene-1", max_len=80)
-    project_dir = get_project_dir(project_id)
-    chapter_file = project_dir / f"{safe_chapter}.md"
-    if not chapter_file.exists():
-        return {"error": f"Chapter '{safe_chapter}' not found"}, 404
-    chapter_dir = get_chapter_dir(project_id, safe_chapter)
-    chapter_dir.mkdir(parents=True, exist_ok=True)
-    filepath = chapter_dir / f"{safe}.md"
-    if filepath.exists():
-        return {"error": "Scene already exists"}, 409
-    filepath.write_text(f"# {safe.replace('-', ' ').title()}\n\n", encoding="utf-8")
-    return {"name": safe, "path": str(filepath), "chapter": chapter_name}
-
-
-@app.route("/api/projects/<project_id>/chapters/<chapter_name>/scenes/<scene_name>/content", methods=["GET"])
-def get_scene_content(project_id, chapter_name, scene_name):
-    name = scene_name.replace(".md", "")
-    fp = get_chapter_dir(project_id, chapter_name) / f"{name}.md"
-    if not fp.exists():
-        return {"error": "Not found"}, 404
-    return {"name": name, "content": fp.read_text(encoding="utf-8"), "path": str(fp)}
-
-
-@app.route("/api/projects/<project_id>/chapters/<chapter_name>/scenes/<scene_name>/content", methods=["PUT"])
-def save_scene_content(project_id, chapter_name, scene_name):
-    data = safe_json()
-    name = scene_name.replace(".md", "")
-    chapter_dir = get_chapter_dir(project_id, chapter_name)
-    chapter_dir.mkdir(parents=True, exist_ok=True)
-    (chapter_dir / f"{name}.md").write_text(data.get("content", ""), encoding="utf-8")
-    return {"ok": True}
-
-
-@app.route("/api/projects/<project_id>/chapters/<chapter_name>/scenes/<scene_name>", methods=["DELETE"])
-def delete_scene(project_id, chapter_name, scene_name):
-    name = scene_name.replace(".md", "")
-    fp = get_chapter_dir(project_id, chapter_name) / f"{name}.md"
-    if fp.exists():
-        fp.unlink()
-    return {"ok": True}
 
 
 # ---- Story Bible / Codex ---------------------------------------------------
@@ -3319,31 +3192,6 @@ MCP_TOOLS = [
         },
     },
     {
-        "name": "list_scenes",
-        "description": "List scenes in a chapter",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "project_id": {"type": "string"},
-                "chapter": {"type": "string"},
-            },
-            "required": ["chapter"],
-        },
-    },
-    {
-        "name": "read_scene",
-        "description": "Read a scene's content",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "project_id": {"type": "string"},
-                "chapter": {"type": "string"},
-                "scene": {"type": "string"},
-            },
-            "required": ["chapter", "scene"],
-        },
-    },
-    {
         "name": "edit_fix",
         "description": "Fix typos/grammar in a text snippet via AI",
         "inputSchema": {
@@ -3520,33 +3368,6 @@ def _mcp_call_tool(name, args):
             return {"error": "invalid project_id"}
         write_chapter(pid, chapter, content)
         return {"ok": True, "bytes": len(content)}
-    if name == "list_scenes":
-        pid = args.get("project_id", "")
-        chapter = args.get("chapter", "").replace(".md", "")
-        if not validate_project_id(pid):
-            return {"error": "invalid project_id"}
-        chapter_dir = get_chapter_dir(pid, chapter)
-        if not chapter_dir.exists():
-            return {"error": f"chapter {chapter!r} not found"}
-        scenes = sorted(
-            [f for f in chapter_dir.glob("scene-*.md") if f.is_file()],
-            key=lambda p: natural_sort_key(p.stem),
-        )
-        return [
-            {"name": f.stem, "modified": os.path.getmtime(f), "size": os.path.getsize(f)}
-            for f in scenes
-        ]
-    if name == "read_scene":
-        pid = args.get("project_id", "")
-        chapter = args.get("chapter", "").replace(".md", "")
-        scene = args.get("scene", "").replace(".md", "")
-        if not validate_project_id(pid):
-            return {"error": "invalid project_id"}
-        chapter_dir = get_chapter_dir(pid, chapter)
-        fp = chapter_dir / f"{scene}.md"
-        if not fp.exists():
-            return {"error": f"scene {scene!r} not found"}
-        return {"name": scene, "content": fp.read_text(encoding="utf-8")}
     if name == "edit_fix":
         text = args.get("text", "")
         instruction = args.get("instruction", "fix typos and grammar")

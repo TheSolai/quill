@@ -413,11 +413,6 @@ class TestChapterWriteIntent:
         assert result is not None
         assert result["target"] == "current"
 
-    def test_detect_write_scene(self):
-        from server import _extract_chapter_write_intent
-        result = _extract_chapter_write_intent("Compose a new scene here")
-        assert result is not None
-
     def test_no_intent_for_random_chat(self):
         from server import _extract_chapter_write_intent
         assert _extract_chapter_write_intent("hello how are you") is None
@@ -632,12 +627,6 @@ class TestInputValidation:
 
     def test_compile_nonexistent_project_404(self, client):
         r = client.get("/api/projects/nonexistent-xyz-12345/compile")
-        assert r.status_code == 404
-
-    def test_list_scenes_nonexistent_chapter_404(self, client):
-        r = client.post("/api/projects", json={"name": "scene-test"})
-        pid = r.get_json()["id"]
-        r = client.get(f"/api/projects/{pid}/chapters/nonexistent/scenes")
         assert r.status_code == 404
 
     def test_save_null_content_succeeds(self, client):
@@ -1063,12 +1052,6 @@ class TestChapterWriteIntent:
         r = _extract_chapter_write_intent("chapter 3 — write it")
         assert r is not None
         assert r["target"] == "chapter-03"
-
-    def test_scene(self):
-        from server import _extract_chapter_write_intent
-        r = _extract_chapter_write_intent("write scene 2")
-        assert r is not None
-        assert r["target"].startswith("scene-")
 
     def test_next_thing(self):
         from server import _extract_chapter_write_intent

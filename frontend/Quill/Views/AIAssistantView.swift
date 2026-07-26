@@ -290,7 +290,7 @@ struct AIAssistantView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .sendToAI)) { note in
-            // A chapter / scene context menu fired "Send to AI". Drop the
+            // A chapter context menu fired "Send to AI". Drop the
             // preset text into the chat input and focus the input field so
             // the writer can finish the thought and hit Return.
             if let text = note.userInfo?["text"] as? String {
@@ -495,7 +495,7 @@ let slashCommands: [SlashCommand] = [
                  example: "/delete ses_20260726_060622"),
     SlashCommand(id: "rename",  title: "/rename <title>",
                  hint: "Rename the current session",
-                 example: "/rename Lila's opening scene"),
+                 example: "/rename Lila's opening chapter"),
     SlashCommand(id: "extract", title: "/extract",
                  hint: "Read all chapters → populate Story Bible",
                  example: "/extract"),
