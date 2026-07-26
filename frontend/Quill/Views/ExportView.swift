@@ -391,7 +391,7 @@ struct ExportView: View {
 
         Task {
             do {
-                let data: Data = try await BackendService.shared.getRaw(
+                let data: Data = try await BackendService.shared.getRawData(
                     "/api/projects/\(project.id)/\(exportFormat.apiPath)"
                 )
                 let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!

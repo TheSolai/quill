@@ -38,6 +38,13 @@ struct AIAssistantView: View {
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundColor(accent)
                 Spacer()
+                // Session picker — list + /new
+                SessionMenu(
+                    state: state,
+                    accent: accent,
+                    textMuted: textMuted,
+                    border: border
+                )
                 // Backend connection status
                 BackendStatusDot(
                     ollamaReachable: state.ollamaReachable,
@@ -380,5 +387,186 @@ struct BackendStatusDot: View {
         if !backendReady { return "Backend is unreachable. Start the Python server." }
         if !ollamaReachable { return "Backend is up, but Ollama is not responding. Check `ollama serve`." }
         return "Backend and Ollama are ready."
+    }
+}
+
+// MARK: - Session Menu
+// Compact dropdown in the AI panel header that shows the current session
+// and lets the writer switch to a previous one, start a new one (/new),
+// or delete a session. Backed by AppState.loadSessions / startNewSession
+// / switchToSession / deleteSession.
+struct SessionMenu: View {
+    @ObservedObject var state: AppState
+    let accent: Color
+    let textMuted: Color
+    let border: Color
+
+    @State private var isOpen: Bool = false
+    @State private var renameMode: Bool = false
+    @State private var renameValue: String = ""
+
+    private var currentTitle: String {
+        if let id = state.currentSessionId,
+           let meta = state.sessions.first(where: { $0.id == id }) {
+            return meta.title
+        }
+        return "Session"
+    }
+
+    var body: some View {
+        Button(action: { isOpen.toggle() }) {
+            HStack(spacing: 4) {
+                Image(systemName: "bubble.left.and.bubble.right.fill")
+                    .font(.system(size: 9))
+                Text(currentTitle)
+                    .font(.system(size: 10, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7))
+            }
+            .foregroundColor(textMuted)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 3)
+                    .stroke(border, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Switch chat session — /new, /list, /switch <id>")
+        .popover(isPresented: $isOpen, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 0) {
+                // Header
+                HStack {
+                    Text("Sessions")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    Spacer()
+                    Button(action: {
+                        isOpen = false
+                        Task { await state.startNewSession() }
+                    }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "plus")
+                            Text("/new")
+                        }
+                        .font(.system(size: 10, design: .monospaced))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Start a new session")
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(accent.opacity(0.1))
+
+                Divider()
+
+                if state.sessions.isEmpty {
+                    Text("No sessions yet")
+                        .font(.system(size: 10))
+                        .foregroundColor(textMuted)
+                        .padding(10)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(state.sessions) { session in
+                                sessionRow(session)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 320)
+                }
+
+                Divider()
+                HStack {
+                    Button(renameMode ? "Cancel" : "Rename current") {
+                        if renameMode {
+                            renameMode = false
+                        } else {
+                            renameValue = currentTitle
+                            renameMode = true
+                        }
+                    }
+                    .font(.system(size: 10))
+                    .buttonStyle(.plain)
+                    Spacer()
+                    Button("Refresh") {
+                        Task { await state.loadSessions() }
+                    }
+                    .font(.system(size: 10))
+                    .buttonStyle(.plain)
+                }
+                .padding(8)
+
+                if renameMode {
+                    VStack(spacing: 6) {
+                        TextField("Session title", text: $renameValue)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11))
+                        Button("Save") {
+                            let t = renameValue
+                            renameMode = false
+                            Task { await state.renameCurrentSession(to: t) }
+                        }
+                        .font(.system(size: 10))
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(renameValue.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 8)
+                }
+            }
+            .frame(width: 300)
+        }
+    }
+
+    @ViewBuilder
+    private func sessionRow(_ session: ChatSessionMeta) -> some View {
+        let isCurrent = session.id == state.currentSessionId
+        HStack(spacing: 6) {
+            Image(systemName: isCurrent ? "bubble.left.fill" : "bubble.left")
+                .font(.system(size: 9))
+                .foregroundColor(isCurrent ? accent : textMuted)
+                .frame(width: 14)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(session.title)
+                    .font(.system(size: 11, weight: isCurrent ? .bold : .regular))
+                    .foregroundColor(isCurrent ? .primary : .secondary)
+                    .lineLimit(1)
+                Text("\(session.messageCount) msg · \(session.lastExcerpt.prefix(30))")
+                    .font(.system(size: 8, design: .monospaced))
+                    .foregroundColor(textMuted)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if isCurrent {
+                Text("active")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundColor(accent)
+            } else {
+                Button(action: {
+                    isOpen = false
+                    Task { await state.switchToSession(session.id) }
+                }) {
+                    Text("Switch")
+                        .font(.system(size: 9))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(accent)
+                Button(action: {
+                    Task { await state.deleteSession(session.id) }
+                }) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 9))
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(isCurrent ? accent.opacity(0.1) : Color.clear)
+        .contentShape(Rectangle())
     }
 }

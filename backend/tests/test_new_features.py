@@ -470,3 +470,182 @@ class TestGenericRename:
         assert r.status_code == 400
         r = client.post("/api/rename", json={"to": "x.md"})
         assert r.status_code == 400
+
+
+# ---- AI chat sessions -----------------------------------------------------
+
+class TestChatSessions:
+    """Sessions let the writer scroll back through past AI conversations,
+    start fresh with /new, and load specific ones by id. Stored per-project
+    under <project>/.sessions/<id>.json."""
+
+    def _create_project(self, client, name="sessions-test"):
+        r = client.post("/api/projects", json={"name": name})
+        assert r.status_code == 200
+        return r.get_json()["id"]
+
+    def test_list_sessions_empty(self, client):
+        pid = self._create_project(client, "sessions-empty")
+        r = client.get(f"/api/projects/{pid}/sessions")
+        assert r.status_code == 200
+        assert r.get_json()["sessions"] == []
+
+    def test_get_current_creates_default(self, client):
+        """If no sessions exist, GET /current should create one."""
+        pid = self._create_project(client, "sessions-autocreate")
+        r = client.get(f"/api/projects/{pid}/sessions/current")
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["messages"] == []
+        assert body["title"] == "New session"
+        assert body["id"].startswith("ses_")
+
+    def test_create_session(self, client):
+        pid = self._create_project(client, "sessions-create")
+        r = client.post(
+            f"/api/projects/{pid}/sessions",
+            json={"title": "My first session",
+                  "messages": [{"role": "user", "content": "Hello!"}]},
+        )
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["title"] == "My first session"
+        assert len(body["messages"]) == 1
+        assert body["id"].startswith("ses_")
+
+    def test_create_session_duplicate_409(self, client):
+        pid = self._create_project(client, "sessions-dup")
+        r = client.post(f"/api/projects/{pid}/sessions", json={"title": "X"})
+        sid = r.get_json()["id"]
+        r = client.post(
+            f"/api/projects/{pid}/sessions", json={"id": sid, "title": "X"}
+        )
+        assert r.status_code == 409
+
+    def test_create_session_invalid_id(self, client):
+        pid = self._create_project(client, "sessions-badid")
+        r = client.post(
+            f"/api/projects/{pid}/sessions",
+            json={"id": "../escape", "title": "X"},
+        )
+        assert r.status_code == 400
+
+    def test_get_session(self, client):
+        pid = self._create_project(client, "sessions-get")
+        create = client.post(
+            f"/api/projects/{pid}/sessions",
+            json={"title": "Get test", "messages": [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": "Hello!"},
+            ]},
+        )
+        sid = create.get_json()["id"]
+        r = client.get(f"/api/projects/{pid}/sessions/{sid}")
+        assert r.status_code == 200
+        assert len(r.get_json()["messages"]) == 2
+
+    def test_get_session_404(self, client):
+        pid = self._create_project(client, "sessions-404")
+        r = client.get(f"/api/projects/{pid}/sessions/ses_nonexistent")
+        assert r.status_code == 404
+
+    def test_update_session(self, client):
+        pid = self._create_project(client, "sessions-update")
+        create = client.post(f"/api/projects/{pid}/sessions", json={"title": "Old"})
+        sid = create.get_json()["id"]
+        r = client.put(
+            f"/api/projects/{pid}/sessions/{sid}",
+            json={"title": "New title",
+                  "messages": [{"role": "user", "content": "Foo"}]},
+        )
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["title"] == "New title"
+        assert len(body["messages"]) == 1
+
+    def test_update_session_caps_messages(self, client):
+        """The backend caps messages at 200 to prevent runaway growth."""
+        pid = self._create_project(client, "sessions-cap")
+        create = client.post(f"/api/projects/{pid}/sessions", json={"title": "Cap"})
+        sid = create.get_json()["id"]
+        big = [{"role": "user", "content": f"msg-{i}"} for i in range(300)]
+        r = client.put(
+            f"/api/projects/{pid}/sessions/{sid}",
+            json={"messages": big},
+        )
+        body = r.get_json()
+        assert len(body["messages"]) == 200
+        # The most recent message is preserved
+        assert body["messages"][-1]["content"] == "msg-299"
+
+    def test_delete_session(self, client):
+        pid = self._create_project(client, "sessions-delete")
+        create = client.post(f"/api/projects/{pid}/sessions", json={"title": "D"})
+        sid = create.get_json()["id"]
+        r = client.delete(f"/api/projects/{pid}/sessions/{sid}")
+        assert r.status_code == 200
+        r = client.get(f"/api/projects/{pid}/sessions/{sid}")
+        assert r.status_code == 404
+
+    def test_list_sessions_metadata(self, client):
+        """The list endpoint returns metadata only (no message bodies)."""
+        pid = self._create_project(client, "sessions-meta")
+        client.post(
+            f"/api/projects/{pid}/sessions",
+            json={"title": "S1", "messages": [{"role": "user", "content": "a" * 1000}]},
+        )
+        client.post(f"/api/projects/{pid}/sessions", json={"title": "S2"})
+        r = client.get(f"/api/projects/{pid}/sessions")
+        body = r.get_json()
+        assert len(body["sessions"]) == 2
+        for s in body["sessions"]:
+            # No "messages" key in metadata (small payload)
+            assert "messages" not in s
+            assert "id" in s and "title" in s and "message_count" in s
+
+    def test_current_session_pointer(self, client):
+        """GET /current returns the same session repeatedly."""
+        pid = self._create_project(client, "sessions-pointer")
+        first = client.get(f"/api/projects/{pid}/sessions/current").get_json()
+        second = client.get(f"/api/projects/{pid}/sessions/current").get_json()
+        assert first["id"] == second["id"]
+
+
+# ---- Story Bible expansion -------------------------------------------------
+
+class TestCodexExpansion:
+    """The Story Bible grew from 6 string fields to a structured + freeform
+    mix. /extract populates the structured fields; the prose system prompt
+    uses them all. These tests verify the expanded GET /codex surface."""
+
+    def _create_project(self, client, name):
+        r = client.post("/api/projects", json={"name": name})
+        return r.get_json()["id"]
+
+    def test_codex_returns_all_new_fields(self, client):
+        """GET /codex should include all the new fields (empty defaults)."""
+        pid = self._create_project(client, "codex-fields")
+        r = client.get(f"/api/projects/{pid}/codex")
+        assert r.status_code == 200
+        body = r.get_json()
+        for key in [
+            "characters", "world", "summary", "style", "plot", "themes",
+            "characters_list", "locations", "timeline", "relationships",
+            "motifs", "glossary",
+            "tone", "pov", "tense",
+            "inciting_incident", "climax", "resolution",
+        ]:
+            assert key in body, f"Missing codex field: {key}"
+
+    def test_codex_defaults_are_empty(self, client):
+        pid = self._create_project(client, "codex-defaults")
+        body = client.get(f"/api/projects/{pid}/codex").get_json()
+        assert body["characters_list"] == []
+        assert body["locations"] == []
+        assert body["timeline"] == []
+        assert body["relationships"] == []
+        assert body["motifs"] == []
+        assert body["glossary"] == []
+        assert body["tone"] == ""
+        assert body["pov"] == ""
+        assert body["tense"] == ""

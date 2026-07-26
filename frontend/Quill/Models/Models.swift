@@ -35,16 +35,57 @@ struct ChapterContent: Codable {
 }
 
 // MARK: - Chat Message
-struct ChatMessage: Identifiable, Equatable {
+struct ChatMessage: Identifiable, Equatable, Codable {
     let id: UUID = UUID()
     var role: MessageRole
     var content: String
     var isStreaming: Bool = false
+    var ts: Date? = nil  // server-side timestamp (optional, used when loading sessions)
 
     enum MessageRole: String, Codable {
         case user
         case assistant
         case system
+    }
+}
+
+// MARK: - Chat Session
+/// A persisted AI conversation, stored on the backend at
+/// `<project>/.sessions/<id>.json`. Loaded on app start, autosaved
+/// whenever a message is added.
+struct ChatSession: Identifiable, Codable, Equatable {
+    let id: String
+    var title: String
+    var createdAt: String?
+    var updatedAt: String?
+    var messages: [ChatMessage]
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case messages
+    }
+}
+
+/// Lightweight session metadata (used for the session list — no messages
+/// field, so the payload stays small even with hundreds of sessions).
+struct ChatSessionMeta: Identifiable, Codable, Equatable {
+    let id: String
+    var title: String
+    var createdAt: String?
+    var updatedAt: String?
+    var messageCount: Int
+    var lastExcerpt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case messageCount = "message_count"
+        case lastExcerpt = "last_excerpt"
     }
 }
 
@@ -117,13 +158,240 @@ struct SceneCreateResponse: Codable {
 }
 
 // MARK: - Story Bible / Codex
+// Structured + freeform fields. The freeform text fields are kept for the
+// prose system prompt (which can ingest them as-is). The structured list
+// fields are surfaced in the UI as editable lists.
 struct Codex: Codable {
+    // Freeform (back-compat with the original text fields)
     var characters: String
     var world: String
     var summary: String
     var style: String
     var plot: String
     var themes: String
+
+    // Structured (new — populated by /extract)
+    var charactersList: [StoryCharacter]
+    var locations: [StoryLocation]
+    var timeline: [StoryTimelineEvent]
+    var relationships: [StoryRelationship]
+    var themesList: [String]
+    var motifs: [String]
+    var glossary: [StoryGlossaryEntry]
+
+    // Voice / structure
+    var tone: String
+    var pov: String
+    var tense: String
+    var incitingIncident: String
+    var climax: String
+    var resolution: String
+
+    // Tolerate missing fields when decoding older codex files
+    init(characters: String = "", world: String = "", summary: String = "",
+         style: String = "", plot: String = "", themes: String = "",
+         charactersList: [StoryCharacter] = [], locations: [StoryLocation] = [],
+         timeline: [StoryTimelineEvent] = [], relationships: [StoryRelationship] = [],
+         themesList: [String] = [], motifs: [String] = [],
+         glossary: [StoryGlossaryEntry] = [],
+         tone: String = "", pov: String = "", tense: String = "",
+         incitingIncident: String = "", climax: String = "",
+         resolution: String = "") {
+        self.characters = characters
+        self.world = world
+        self.summary = summary
+        self.style = style
+        self.plot = plot
+        self.themes = themes
+        self.charactersList = charactersList
+        self.locations = locations
+        self.timeline = timeline
+        self.relationships = relationships
+        self.themesList = themesList
+        self.motifs = motifs
+        self.glossary = glossary
+        self.tone = tone
+        self.pov = pov
+        self.tense = tense
+        self.incitingIncident = incitingIncident
+        self.climax = climax
+        self.resolution = resolution
+    }
+}
+
+// MARK: - Story Bible structured entries
+
+struct StoryCharacter: Codable, Identifiable, Equatable {
+    let id: UUID
+    var name: String
+    var role: String  // protagonist, antagonist, sidekick, etc.
+    var description: String
+    var goal: String
+    var arc: String
+
+    init(id: UUID = UUID(), name: String = "", role: String = "",
+         description: String = "", goal: String = "", arc: String = "") {
+        self.id = id; self.name = name; self.role = role
+        self.description = description; self.goal = goal; self.arc = arc
+    }
+}
+
+struct StoryLocation: Codable, Identifiable, Equatable {
+    let id: UUID
+    var name: String
+    var description: String
+    var significance: String
+
+    init(id: UUID = UUID(), name: String = "", description: String = "",
+         significance: String = "") {
+        self.id = id; self.name = name; self.description = description
+        self.significance = significance
+    }
+}
+
+struct StoryTimelineEvent: Codable, Identifiable, Equatable {
+    let id: UUID
+    var order: Int
+    var when: String
+    var what: String
+
+    init(id: UUID = UUID(), order: Int = 0, when: String = "", what: String = "") {
+        self.id = id; self.order = order; self.when = when; self.what = what
+    }
+}
+
+struct StoryRelationship: Codable, Identifiable, Equatable {
+    let id: UUID
+    var from: String
+    var to: String
+    var type: String
+    var description: String
+
+    init(id: UUID = UUID(), from: String = "", to: String = "",
+         type: String = "", description: String = "") {
+        self.id = id; self.from = from; self.to = to; self.type = type
+        self.description = description
+    }
+}
+
+struct StoryGlossaryEntry: Codable, Identifiable, Equatable {
+    let id: UUID
+    var term: String
+    var definition: String
+
+    init(id: UUID = UUID(), term: String = "", definition: String = "") {
+        self.id = id; self.term = term; self.definition = definition
+    }
+}
+
+// MARK: - Helpers for dict-shaped API responses
+//
+// The backend returns Story Bible entries as raw dicts (since they're
+// stored in .quill_context.json with mixed types). These factories turn
+// the loose dicts into our typed structs, falling back to safe defaults
+// when fields are missing.
+
+extension StoryCharacter {
+    static func from(dict: [String: Any]) -> StoryCharacter {
+        StoryCharacter(
+            name: dict["name"] as? String ?? "",
+            role: dict["role"] as? String ?? "",
+            description: dict["description"] as? String ?? "",
+            goal: dict["goal"] as? String ?? "",
+            arc: dict["arc"] as? String ?? ""
+        )
+    }
+}
+
+extension StoryLocation {
+    static func from(dict: [String: Any]) -> StoryLocation {
+        StoryLocation(
+            name: dict["name"] as? String ?? "",
+            description: dict["description"] as? String ?? "",
+            significance: dict["significance"] as? String ?? ""
+        )
+    }
+}
+
+extension StoryTimelineEvent {
+    static func from(dict: [String: Any]) -> StoryTimelineEvent {
+        StoryTimelineEvent(
+            order: dict["order"] as? Int ?? 0,
+            when: dict["when"] as? String ?? "",
+            what: dict["what"] as? String ?? ""
+        )
+    }
+}
+
+extension StoryRelationship {
+    static func from(dict: [String: Any]) -> StoryRelationship {
+        StoryRelationship(
+            from: dict["from"] as? String ?? "",
+            to: dict["to"] as? String ?? "",
+            type: dict["type"] as? String ?? "",
+            description: dict["description"] as? String ?? ""
+        )
+    }
+}
+
+extension StoryGlossaryEntry {
+    static func from(dict: [String: Any]) -> StoryGlossaryEntry {
+        StoryGlossaryEntry(
+            term: dict["term"] as? String ?? "",
+            definition: dict["definition"] as? String ?? ""
+        )
+    }
+}
+
+extension Codex {
+    /// Serialize to a dict for PUT /api/projects/<id>/codex. Keeps the
+    /// wire format stable and lets the backend store everything in the
+    /// single .quill_context.json file.
+    func toJSON() -> [String: Any] {
+        var d: [String: Any] = [
+            "characters": characters,
+            "world": world,
+            "summary": summary,
+            "style": style,
+            "plot": plot,
+            "themes": themes,
+        ]
+        if !charactersList.isEmpty {
+            d["characters_list"] = charactersList.map { c in
+                ["name": c.name, "role": c.role, "description": c.description,
+                 "goal": c.goal, "arc": c.arc]
+            }
+        }
+        if !locations.isEmpty {
+            d["locations"] = locations.map { l in
+                ["name": l.name, "description": l.description, "significance": l.significance]
+            }
+        }
+        if !timeline.isEmpty {
+            d["timeline"] = timeline.map { t in
+                ["order": t.order, "when": t.when, "what": t.what]
+            }
+        }
+        if !relationships.isEmpty {
+            d["relationships"] = relationships.map { r in
+                ["from": r.from, "to": r.to, "type": r.type, "description": r.description]
+            }
+        }
+        if !themesList.isEmpty { d["themes_list"] = themesList }
+        if !motifs.isEmpty { d["motifs"] = motifs }
+        if !glossary.isEmpty {
+            d["glossary"] = glossary.map { g in
+                ["term": g.term, "definition": g.definition]
+            }
+        }
+        if !tone.isEmpty { d["tone"] = tone }
+        if !pov.isEmpty { d["pov"] = pov }
+        if !tense.isEmpty { d["tense"] = tense }
+        if !incitingIncident.isEmpty { d["inciting_incident"] = incitingIncident }
+        if !climax.isEmpty { d["climax"] = climax }
+        if !resolution.isEmpty { d["resolution"] = resolution }
+        return d
+    }
 }
 
 // MARK: - Stats
@@ -245,6 +513,8 @@ class AppState: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var isStreaming: Bool = false
     @Published var streamBuffer: String = ""
+    @Published var sessions: [ChatSessionMeta] = []
+    @Published var currentSessionId: String? = nil
 
     @Published var isBackendReady: Bool = false
     @Published var backendError: String?
@@ -318,7 +588,7 @@ class AppState: ObservableObject {
         inboxLoading = true
         defer { inboxLoading = false }
         do {
-            let resp = try await BackendService.shared.getRaw("/api/agentmail/inbox?limit=50")
+            let resp = try await BackendService.shared.getRawData("/api/agentmail/inbox?limit=50")
             if let json = try? JSONSerialization.jsonObject(with: resp) as? [String: Any],
                let list = json["messages"] as? [[String: Any]] {
                 let parsed = list.compactMap { InboxMessage.from(json: $0) }
@@ -462,6 +732,10 @@ class AppState: ObservableObject {
         print("[Quill] selectProject: state reset, calling loadChapters")
         await loadChapters()
         print("[Quill] selectProject: loadChapters done, chapters count: \(chapters.count)")
+        // Reload the Story Bible + chat session for this project
+        async let codexTask: Void = loadCodex()
+        async let sessionTask: Void = loadCurrentSession()
+        _ = await (codexTask, sessionTask)
     }
 
     func loadChapters() async {
@@ -1037,9 +1311,48 @@ class AppState: ObservableObject {
     func loadCodex() async {
         guard let project = currentProject else { return }
         do {
-            codex = try await BackendService.shared.get(
+            let raw: [String: Any] = try await BackendService.shared.getRaw(
                 "/api/projects/\(project.id)/codex"
             )
+            // Manually decode so we can keep using the structured fields
+            // even if the backend returns old-shape data with strings
+            // instead of arrays.
+            var c = codex
+            c.characters = raw["characters"] as? String ?? ""
+            c.world = raw["world"] as? String ?? ""
+            c.summary = raw["summary"] as? String ?? ""
+            c.style = raw["style"] as? String ?? ""
+            c.plot = raw["plot"] as? String ?? ""
+            c.themes = raw["themes"] as? String ?? ""
+            // New fields (may be missing in old data)
+            if let list = raw["characters_list"] as? [[String: Any]] {
+                c.charactersList = list.map(StoryCharacter.from(dict:))
+            }
+            if let list = raw["locations"] as? [[String: Any]] {
+                c.locations = list.map(StoryLocation.from(dict:))
+            }
+            if let list = raw["timeline"] as? [[String: Any]] {
+                c.timeline = list.map(StoryTimelineEvent.from(dict:))
+            }
+            if let list = raw["relationships"] as? [[String: Any]] {
+                c.relationships = list.map(StoryRelationship.from(dict:))
+            }
+            if let list = raw["themes_list"] as? [String] {
+                c.themesList = list
+            } else if let list = raw["themes"] as? [String] {
+                c.themesList = list
+            }
+            if let list = raw["motifs"] as? [String] { c.motifs = list }
+            if let list = raw["glossary"] as? [[String: Any]] {
+                c.glossary = list.map(StoryGlossaryEntry.from(dict:))
+            }
+            c.tone = raw["tone"] as? String ?? ""
+            c.pov = raw["pov"] as? String ?? ""
+            c.tense = raw["tense"] as? String ?? ""
+            c.incitingIncident = raw["inciting_incident"] as? String ?? ""
+            c.climax = raw["climax"] as? String ?? ""
+            c.resolution = raw["resolution"] as? String ?? ""
+            codex = c
         } catch {
             backendError = error.localizedDescription
         }
@@ -1050,18 +1363,173 @@ class AppState: ObservableObject {
         do {
             try await BackendService.shared.put(
                 "/api/projects/\(project.id)/codex",
-                body: [
-                    "characters": codex.characters,
-                    "world": codex.world,
-                    "summary": codex.summary,
-                    "style": codex.style,
-                    "plot": codex.plot,
-                    "themes": codex.themes,
-                ]
+                body: codex.toJSON()
             )
             statusMessage = "Story Bible saved"
         } catch {
             backendError = error.localizedDescription
+        }
+    }
+
+    // ---- AI chat sessions ------------------------------------------------
+
+    /// Load the current session for the project (creates one if none
+    /// exists). Called on project select / app start.
+    func loadCurrentSession() async {
+        guard let project = currentProject else {
+            messages = []
+            sessions = []
+            currentSessionId = nil
+            return
+        }
+        do {
+            // Load the session list in parallel with the current session.
+            async let listTask: [String: Any] = BackendService.shared.getRaw(
+                "/api/projects/\(project.id)/sessions"
+            )
+            let session: ChatSession = try await BackendService.shared.get(
+                "/api/projects/\(project.id)/sessions/current"
+            )
+            self.currentSessionId = session.id
+            self.messages = session.messages
+            // Session list (no messages — small payload)
+            if let list = try? await listTask, let arr = list["sessions"] as? [[String: Any]] {
+                let decoder = JSONDecoder()
+                self.sessions = arr.compactMap { dict in
+                    guard let data = try? JSONSerialization.data(withJSONObject: dict),
+                          let meta = try? decoder.decode(ChatSessionMeta.self, from: data)
+                    else { return nil }
+                    return meta
+                }
+            }
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    /// List all sessions for the current project.
+    func loadSessions() async {
+        guard let project = currentProject else { return }
+        do {
+            let raw: [String: Any] = try await BackendService.shared.getRaw(
+                "/api/projects/\(project.id)/sessions"
+            )
+            if let arr = raw["sessions"] as? [[String: Any]] {
+                let decoder = JSONDecoder()
+                self.sessions = arr.compactMap { dict in
+                    guard let data = try? JSONSerialization.data(withJSONObject: dict),
+                          let meta = try? decoder.decode(ChatSessionMeta.self, from: data)
+                    else { return nil }
+                    return meta
+                }
+            }
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    /// Start a brand new session. The backend auto-saves it and points
+    /// the project's current_session at the new id.
+    func startNewSession() async {
+        guard let project = currentProject else { return }
+        do {
+            // Use the first user message as the title if we have one queued
+            let firstUser = messages.first(where: { $0.role == .user })?.content
+            let title = firstUser.map { String($0.prefix(60)) } ?? "New session"
+            let body: [String: Any] = [
+                "title": title,
+                "messages": [] as [[String: Any]],
+            ]
+            let newSess: ChatSession = try await BackendService.shared.post(
+                "/api/projects/\(project.id)/sessions", body: body
+            )
+            self.currentSessionId = newSess.id
+            self.messages = []  // start fresh
+            await loadSessions()
+            ToastCenter.shared.postSuccess("New session started")
+        } catch {
+            backendError = error.localizedDescription
+            ToastCenter.shared.postError("New session failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Switch to an existing session by id.
+    func switchToSession(_ id: String) async {
+        guard let project = currentProject else { return }
+        do {
+            let session: ChatSession = try await BackendService.shared.get(
+                "/api/projects/\(project.id)/sessions/\(id)"
+            )
+            self.currentSessionId = session.id
+            self.messages = session.messages
+            // Mark this as the current on the backend too
+            // (set via a side-channel — for now we just load and rely on
+            // auto-save to keep the new current in sync)
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    /// Delete a session by id.
+    func deleteSession(_ id: String) async {
+        guard let project = currentProject else { return }
+        do {
+            try await BackendService.shared.delete(
+                "/api/projects/\(project.id)/sessions/\(id)"
+            )
+            if currentSessionId == id {
+                // The deleted one was current — fall back to a new one
+                await loadCurrentSession()
+            }
+            await loadSessions()
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    /// Rename the current session.
+    func renameCurrentSession(to newTitle: String) async {
+        guard let project = currentProject, let sid = currentSessionId else { return }
+        do {
+            try await BackendService.shared.put(
+                "/api/projects/\(project.id)/sessions/\(sid)",
+                body: ["title": newTitle]
+            )
+            await loadSessions()
+        } catch {
+            backendError = error.localizedDescription
+        }
+    }
+
+    /// Autosave the current session. Called after each user/assistant
+    /// message. Debounced via `sessionSaveTask` so we don't write on
+    /// every keystroke.
+    private var sessionSaveTask: Task<Void, Never>?
+    func scheduleSessionSave() {
+        sessionSaveTask?.cancel()
+        sessionSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)  // 1s debounce
+            guard !Task.isCancelled else { return }
+            await self?.saveCurrentSession()
+        }
+    }
+    func saveCurrentSession() async {
+        guard let project = currentProject, let sid = currentSessionId else { return }
+        // Only autosave the messages, not the title (so we don't fight
+        // the user if they're typing a custom title)
+        let payload: [String: Any] = [
+            "messages": messages.map { m -> [String: Any] in
+                var d: [String: Any] = ["role": m.role.rawValue, "content": m.content]
+                if let ts = m.ts { d["ts"] = ISO8601DateFormatter().string(from: ts) }
+                return d
+            }
+        ]
+        do {
+            try await BackendService.shared.put(
+                "/api/projects/\(project.id)/sessions/\(sid)", body: payload
+            )
+        } catch {
+            // Silent — don't bother the user for autosave failures
         }
     }
 
@@ -1183,8 +1651,47 @@ class AppState: ObservableObject {
     }
 
     func sendMessage(_ text: String, mode: GenerationMode = .short, chapter: String = "", outline: String = "", style: String = "") async {
+        // Slash commands for chat sessions
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        if lower == "/new" || lower == "/new session" {
+            await startNewSession()
+            return
+        }
+        if lower == "/list" || lower == "/sessions" {
+            await loadSessions()
+            let list = sessions.map { "• [\($0.id.prefix(20))…] \($0.title) (\($0.messageCount) msg)" }.joined(separator: "\n")
+            messages.append(ChatMessage(role: .system,
+                content: sessions.isEmpty
+                    ? "No previous sessions. Use **/new** to start one."
+                    : "Sessions (newest first):\n\n\(list)\n\nUse `/switch <id>` or click one in the sidebar."))
+            return
+        }
+        if lower.hasPrefix("/switch ") {
+            let id = String(trimmed.dropFirst("/switch ".count)).trimmingCharacters(in: .whitespaces)
+            if !id.isEmpty {
+                await switchToSession(id)
+                return
+            }
+        }
+        if lower.hasPrefix("/delete ") {
+            let id = String(trimmed.dropFirst("/delete ".count)).trimmingCharacters(in: .whitespaces)
+            if !id.isEmpty {
+                await deleteSession(id)
+                return
+            }
+        }
+        if lower.hasPrefix("/rename ") {
+            let newTitle = String(trimmed.dropFirst("/rename ".count)).trimmingCharacters(in: .whitespaces)
+            if !newTitle.isEmpty {
+                await renameCurrentSession(to: newTitle)
+                return
+            }
+        }
+
         let userMsg = ChatMessage(role: .user, content: text)
         messages.append(userMsg)
+        scheduleSessionSave()
 
         // Build the conversation history to send to /api/chat
         let history = messages.filter { !$0.isStreaming }.map { msg in
@@ -1246,6 +1753,16 @@ class AppState: ObservableObject {
                         self.isStreaming = false
                         if let idx = self.messages.firstIndex(where: { $0.id == assistantMsgId }) {
                             self.messages[idx].isStreaming = false
+                        }
+                        // Persist the new turn to disk
+                        self.scheduleSessionSave()
+                        // If this is a brand-new session (no title yet) and we
+                        // just had our first user/assistant exchange, set a
+                        // sensible title from the first user message.
+                        if self.currentSessionId != nil, self.messages.count == 2,
+                           let firstUser = self.messages.first(where: { $0.role == .user })?.content {
+                            let title = String(firstUser.prefix(60))
+                            Task { await self.renameCurrentSession(to: title) }
                         }
                         // If Quill wrote to a chapter, refresh the editor.
                         // If the chapter was written to a different project (e.g.

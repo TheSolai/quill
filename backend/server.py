@@ -467,6 +467,18 @@ def chat_completion():
         return {"text": result.get("message", ""), "slot_id": slot_id,
                 "model_id": slot.model_id, "email": result}
 
+    # Slash command: /extract — read the chapters and update the Story Bible
+    if last_user.strip().lower().startswith("/extract"):
+        return _handle_extract_command(
+            last_user, project_id, data, messages, slot
+        )
+
+    # Slash command: /bible <field> — show a specific Story Bible field
+    if last_user.strip().lower().startswith("/bible"):
+        return _handle_bible_show_command(
+            last_user, project_id, data, slot
+        )
+
     # Chapter-write intent: when user says "write chapter N" / "draft this chapter"
     # we generate the prose (non-streaming) and save it to the chapter file
     # on disk. Then we return the result with a `chapter_written` field so
@@ -529,12 +541,62 @@ def chat_completion():
             context_block = []
             if ctx.get("characters"):
                 context_block.append(f"CHARACTERS (story bible):\n{ctx['characters']}")
+            # Structured character list (from /extract) — already pretty-printed
+            chars_list = ctx.get("characters_list")
+            if isinstance(chars_list, list) and chars_list:
+                lines = [f"  - {c.get('name', '?')} ({c.get('role', 'unknown')}): "
+                         f"{c.get('description', '').strip()}"
+                         for c in chars_list if isinstance(c, dict)]
+                if lines:
+                    context_block.append("CHARACTERS (structured):\n" + "\n".join(lines))
             if ctx.get("world"):
                 context_block.append(f"WORLD (story bible):\n{ctx['world']}")
             if ctx.get("summary"):
                 context_block.append(f"PLOT SUMMARY:\n{ctx['summary']}")
+            if ctx.get("plot"):
+                context_block.append(f"PLOT OUTLINE:\n{ctx['plot']}")
+            if ctx.get("inciting_incident"):
+                context_block.append(f"INCITING INCIDENT:\n{ctx['inciting_incident']}")
+            if ctx.get("climax"):
+                context_block.append(f"CLIMAX (where the story is heading):\n{ctx['climax']}")
+            if ctx.get("resolution"):
+                context_block.append(f"RESOLUTION (where the story is going):\n{ctx['resolution']}")
             if ctx.get("style"):
                 context_block.append(f"STYLE GUIDE:\n{ctx['style']}")
+            if ctx.get("tone"):
+                context_block.append(f"TONE: {ctx['tone']}")
+            if ctx.get("pov"):
+                context_block.append(f"POINT OF VIEW: {ctx['pov']}")
+            if ctx.get("tense"):
+                context_block.append(f"TENSE: {ctx['tense']}")
+            # Themes + motifs (helps the AI track symbolic weight)
+            themes = ctx.get("themes")
+            if isinstance(themes, list) and themes:
+                context_block.append("THEMES:\n" + "\n".join(f"  - {t}" for t in themes))
+            motifs = ctx.get("motifs")
+            if isinstance(motifs, list) and motifs:
+                context_block.append("MOTIFS (recurring imagery):\n" +
+                                     "\n".join(f"  - {m}" for m in motifs))
+            # Locations, timeline, relationships
+            locs = ctx.get("locations")
+            if isinstance(locs, list) and locs:
+                lines = [f"  - {l.get('name', '?')}: {l.get('description', '').strip()}"
+                         for l in locs if isinstance(l, dict)]
+                if lines:
+                    context_block.append("LOCATIONS:\n" + "\n".join(lines))
+            tl = ctx.get("timeline")
+            if isinstance(tl, list) and tl:
+                lines = [f"  {t.get('when', '?')}: {t.get('what', '').strip()}"
+                         for t in tl if isinstance(t, dict)]
+                if lines:
+                    context_block.append("TIMELINE (so far):\n" + "\n".join(lines))
+            rels = ctx.get("relationships")
+            if isinstance(rels, list) and rels:
+                lines = [f"  - {r.get('from', '?')} → {r.get('to', '?')} "
+                         f"({r.get('type', '?')}): {r.get('description', '').strip()}"
+                         for r in rels if isinstance(r, dict)]
+                if lines:
+                    context_block.append("RELATIONSHIPS:\n" + "\n".join(lines))
             # Include the previous chapter (if any) for voice continuity
             prev_chapter_name = None
             for f in existing_chapters:
@@ -970,6 +1032,29 @@ Working style: dry, direct, no fluff. You collaborate with the user (who is
 also named Quill — the human writer). You never refuse a reasonable request
 within your capabilities. You trust the reader to understand subtext.
 
+SLASH COMMANDS — when the user types one of these, you get a direct answer
+WITHOUT going through the LLM (the backend short-circuits these):
+  /extract              read all chapters and update the Story Bible
+                         (characters, locations, timeline, relationships,
+                         themes, motifs, glossary, tone, pov, tense,
+                         inciting_incident, climax, resolution). This is
+                         a great way to bootstrap the Story Bible.
+  /bible [field]        show a Story Bible field. /bible list shows all
+                         fields. /bible characters, /bible locations,
+                         /bible themes, /bible timeline, etc.
+  /bible <name>         accepts aliases: chars, locs, places, events, rels,
+                         inciting, all.
+
+When the user types a slash command, the backend handles it directly — you
+will NOT see a tool call for /extract or /bible. Just trust the result and
+explain it to the user if asked.
+
+STORY BIBLE — when you write prose, you have access to a rich Story Bible
+that includes: characters_list (with role, description, goal, arc),
+locations, timeline, relationships, themes, motifs, glossary, tone, pov,
+tense, inciting_incident, climax, resolution. Honor them. Reference them.
+The user's hard work on the Story Bible should show in your prose.
+
 When you receive a tool result, incorporate it naturally into your reply.
 Do not output raw JSON tool calls in your final visible response — use the
 tools to gather information, then answer in prose."""
@@ -978,6 +1063,246 @@ tools to gather information, then answer in prose."""
     if skills_block:
         return base + "\n\n---\n\n" + skills_block
     return base
+
+
+# --------------------------------------------------------------------------
+# Slash commands
+# --------------------------------------------------------------------------
+# /extract  — read all chapters and update the Story Bible (characters,
+#              world, themes, etc.) using the AI in a non-streaming pass.
+# /bible    — short-circuit: show a Story Bible field directly without
+#              hitting the LLM. /bible list, /bible characters, etc.
+
+_EXTRACT_SYSTEM = r"""You are a Story Bible extractor. Given the text of one
+or more chapters of a novel, return a JSON object with these keys
+(populate what you can; leave empty arrays/strings if nothing found):
+
+{
+  "characters": [
+    {"name": "...", "role": "protagonist|antagonist|sidekick|...|other",
+     "description": "1-2 sentences",
+     "goal": "what they want",
+     "arc": "how they change"}
+  ],
+  "locations": [
+    {"name": "...", "description": "1-2 sentences", "significance": "..."}
+  ],
+  "timeline": [
+    {"order": 0, "when": "Day 1 / Year X / Before the war", "what": "..."}
+  ],
+  "relationships": [
+    {"from": "A", "to": "B", "type": "sister|rival|love-interest|...|other",
+     "description": "1 sentence"}
+  ],
+  "themes": ["...", "..."],
+  "motifs": ["...", "..."],
+  "glossary": [
+    {"term": "...", "definition": "..."}
+  ],
+  "tone": "1-3 words (e.g. 'dark, lyrical, hopeful')",
+  "pov": "first|second|third-limited|third-omniscient",
+  "tense": "past|present",
+  "inciting_incident": "the event that kicks off the main plot",
+  "climax": "the peak of the conflict",
+  "resolution": "how the story resolves"
+}
+
+Rules:
+- Use ONLY what's in the text. Do not invent.
+- Return raw JSON, no prose, no code fences.
+- Merge duplicates. If a character is mentioned three times, one entry.
+- If a section is empty, return an empty array/string."""
+
+
+def _handle_extract_command(text: str, project_id: str, data: dict, messages: list, slot) -> Response:
+    """Read the project's chapters and have the AI extract/update the
+    Story Bible. Returns an SSE stream with the extraction result."""
+    effective_pid = project_id if project_id and project_id != "default" else "default"
+    # Gather all chapters' content
+    project_dir = get_project_dir(effective_pid)
+    files = sorted(
+        [f for f in project_dir.glob("*.md") if f.is_file()],
+        key=lambda p: natural_sort_key(p.stem),
+    )
+    chapters_text = []
+    for f in files:
+        try:
+            chapters_text.append(f"# {f.stem}\n\n{f.read_text(encoding='utf-8')}")
+        except Exception:
+            continue
+    combined = "\n\n---\n\n".join(chapters_text)[:30000]  # cap for context window
+    if not combined.strip():
+        return _quick_sse_error("No chapters to extract from yet.")
+
+    try:
+        provider = _slot_providers.get_provider(slot)
+    except Exception as e:
+        return _quick_sse_error(f"provider init failed: {e}")
+
+    extract_messages = [
+        {"role": "system", "content": _EXTRACT_SYSTEM},
+        {"role": "user", "content": f"Extract the Story Bible from these chapters:\n\n{combined}"},
+    ]
+    try:
+        raw = provider.chat(extract_messages, max_tokens=3000, temperature=0.1)
+    except Exception as e:
+        return _quick_sse_error(f"extract failed: {e}")
+    # Parse the JSON response
+    extracted = _try_parse_json(raw)
+    if not extracted:
+        return _quick_sse_error(
+            "Couldn't parse Story Bible JSON. Try again or check the model."
+        )
+    # Merge into project context
+    ctx = get_project_context(effective_pid)
+    # Freeform text fields (preserve user's prior prose-style notes if any)
+    if extracted.get("inciting_incident"):
+        ctx["inciting_incident"] = str(extracted["inciting_incident"])[:2000]
+    if extracted.get("climax"):
+        ctx["climax"] = str(extracted["climax"])[:2000]
+    if extracted.get("resolution"):
+        ctx["resolution"] = str(extracted["resolution"])[:2000]
+    if extracted.get("tone"):
+        ctx["tone"] = str(extracted["tone"])[:200]
+    if extracted.get("pov"):
+        ctx["pov"] = str(extracted["pov"])[:50]
+    if extracted.get("tense"):
+        ctx["tense"] = str(extracted["tense"])[:20]
+    # Lists: replace with extracted values (we trust the AI's full extraction)
+    if isinstance(extracted.get("characters_list"), list):
+        ctx["characters_list"] = extracted["characters_list"][:50]
+    elif "characters" in extracted and isinstance(extracted["characters"], list):
+        # Some models may put it under "characters" with structured entries
+        if extracted["characters"] and isinstance(extracted["characters"][0], dict):
+            ctx["characters_list"] = extracted["characters"][:50]
+    if isinstance(extracted.get("locations"), list):
+        ctx["locations"] = extracted["locations"][:50]
+    if isinstance(extracted.get("timeline"), list):
+        ctx["timeline"] = extracted["timeline"][:100]
+    if isinstance(extracted.get("relationships"), list):
+        ctx["relationships"] = extracted["relationships"][:50]
+    if isinstance(extracted.get("themes"), list):
+        ctx["themes"] = extracted["themes"][:30]
+        # Also keep the legacy "themes" text version for the prose system prompt
+        ctx["themes_text"] = "\n".join(f"- {t}" for t in extracted["themes"])
+    if isinstance(extracted.get("motifs"), list):
+        ctx["motifs"] = extracted["motifs"][:30]
+    if isinstance(extracted.get("glossary"), list):
+        ctx["glossary"] = extracted["glossary"][:50]
+    # Also keep the legacy "characters" freeform field populated from
+    # the extracted structured list (so the prose system prompt still works)
+    chars = ctx.get("characters_list") or []
+    if chars and not ctx.get("characters"):
+        ctx["characters"] = "\n".join(
+            f"- {c.get('name', '?')}: {c.get('description', '')}".strip()
+            for c in chars if isinstance(c, dict)
+        )
+    save_project_context(effective_pid, ctx)
+    # Stream a success message + the count
+    n_chars = len(ctx.get("characters_list") or [])
+    n_locs = len(ctx.get("locations") or [])
+    n_events = len(ctx.get("timeline") or [])
+    n_rels = len(ctx.get("relationships") or [])
+    n_themes = len(ctx.get("themes") or [])
+    summary = (
+        f"Extracted Story Bible from {len(files)} chapter(s): "
+        f"{n_chars} character(s), {n_locs} location(s), {n_events} timeline event(s), "
+        f"{n_rels} relationship(s), {n_themes} theme(s). "
+        f"Open the Story Bible panel to review."
+    )
+    def gen_extract():
+        yield f"data: {json.dumps({'token': summary, 'slot_id': slot.id})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'slot_id': slot.id, 'codex_extracted': True, 'codex': ctx})}\n\n"
+    return Response(gen_extract(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache"})
+
+
+def _handle_bible_show_command(text: str, project_id: str, data: dict, slot) -> dict:
+    """Show a Story Bible field directly without hitting the LLM."""
+    effective_pid = project_id if project_id and project_id != "default" else "default"
+    ctx = get_project_context(effective_pid)
+    args = text.strip().split(maxsplit=1)
+    field = args[1].strip() if len(args) > 1 else "list"
+    field_lower = field.lower()
+    field_map = {
+        "chars": "characters_list", "characters": "characters_list",
+        "locs": "locations", "locations": "locations", "places": "locations",
+        "timeline": "timeline", "events": "timeline",
+        "rels": "relationships", "relationships": "relationships",
+        "themes": "themes", "motifs": "motifs", "glossary": "glossary",
+        "summary": "summary", "plot": "plot", "style": "style",
+        "world": "world", "tone": "tone", "pov": "pov", "tense": "tense",
+        "inciting": "inciting_incident", "climax": "climax", "resolution": "resolution",
+    }
+    if field_lower in ("list", "all", ""):
+        keys = sorted(set(ctx.keys()) - {"current_chapter", "current_session",
+                                          "default_initialized"})
+        out_lines = [f"Story Bible fields for `{effective_pid}`:",
+                     ""]
+        for k in keys:
+            v = ctx[k]
+            if isinstance(v, list):
+                out_lines.append(f"  {k} ({len(v)} item(s))")
+            elif isinstance(v, str):
+                preview = v[:60].replace("\n", " ")
+                out_lines.append(f"  {k}: \"{preview}{'…' if len(v) > 60 else ''}\"")
+            else:
+                out_lines.append(f"  {k}: {type(v).__name__}")
+        text_out = "\n".join(out_lines)
+    else:
+        canonical = field_map.get(field_lower, field_lower)
+        v = ctx.get(canonical)
+        if v is None:
+            text_out = f"No field `{canonical}` set yet. Use `/extract` to populate it from your chapters."
+        elif isinstance(v, list):
+            text_out = f"{canonical}:\n" + "\n".join(f"  - {x}" for x in v)
+        else:
+            text_out = f"{canonical}:\n{v}"
+    return {"text": text_out, "slot_id": slot.id, "model_id": slot.model_id}
+
+
+def _try_parse_json(text: str) -> Optional[dict]:
+    """Try to extract a JSON object from a model response. Strips code
+    fences, finds the first { ... } block, and parses it. Returns the
+    dict on success, or None on failure."""
+    if not text:
+        return None
+    s = text.strip()
+    # Strip leading/trailing code fences
+    if s.startswith("```"):
+        # Drop first line (```json or ```)
+        lines = s.split("\n")
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        s = "\n".join(lines).strip()
+    # Find the first { and last }
+    start = s.find("{")
+    end = s.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    candidate = s[start:end + 1]
+    # Try direct parse
+    try:
+        obj = json.loads(candidate)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+    # Try stripping trailing commas
+    cleaned = re.sub(r",\s*([}\]])", r"\1", candidate)
+    try:
+        obj = json.loads(cleaned)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def _quick_sse_error(message: str) -> Response:
+    def gen():
+        yield f"data: {json.dumps({'error': message})}\n\n"
+    return Response(gen(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache"})
 
 
 def _handle_email_intent(intent: dict, project_id: str) -> dict:
@@ -2444,37 +2769,273 @@ def delete_scene(project_id, chapter_name, scene_name):
 
 # ---- Story Bible / Codex ---------------------------------------------------
 
-@app.route("/api/projects/<project_id>/codex", methods=["GET"])
-def get_codex(project_id):
-    """Return the structured Story Bible: characters, world, summary, style, plot."""
-    ctx = get_project_context(project_id)
+def _codex_response(ctx: dict) -> dict:
+    """Return the full Story Bible surface. Used by GET /codex, PUT /codex
+    response, and the /extract success payload."""
     return {
+        # Freeform text fields
         "characters": ctx.get("characters", ""),
         "world": ctx.get("world", ""),
         "summary": ctx.get("summary", ""),
         "style": ctx.get("style", ""),
         "plot": ctx.get("plot", ""),
         "themes": ctx.get("themes", ""),
+        # Structured lists (populated by /extract)
+        "characters_list": ctx.get("characters_list", []),
+        "locations": ctx.get("locations", []),
+        "timeline": ctx.get("timeline", []),
+        "relationships": ctx.get("relationships", []),
+        "motifs": ctx.get("motifs", []),
+        "glossary": ctx.get("glossary", []),
+        # Voice / structure
+        "tone": ctx.get("tone", ""),
+        "pov": ctx.get("pov", ""),
+        "tense": ctx.get("tense", ""),
+        "inciting_incident": ctx.get("inciting_incident", ""),
+        "climax": ctx.get("climax", ""),
+        "resolution": ctx.get("resolution", ""),
     }
+
+
+@app.route("/api/projects/<project_id>/codex", methods=["GET"])
+def get_codex(project_id):
+    """Return the full Story Bible: freeform + structured + voice."""
+    return _codex_response(get_project_context(project_id))
 
 
 @app.route("/api/projects/<project_id>/codex", methods=["PUT"])
 def update_codex(project_id):
-    """Update the Story Bible fields. Only provided fields are updated."""
+    """Update the Story Bible. Accepts both freeform text and structured
+    list fields. Only provided fields are updated."""
     data = safe_json()
     ctx = get_project_context(project_id)
-    for key in ["characters", "world", "summary", "style", "plot", "themes"]:
+    # Freeform text fields
+    for key in ["characters", "world", "summary", "style", "plot", "themes",
+                "tone", "pov", "tense",
+                "inciting_incident", "climax", "resolution"]:
         if key in data and isinstance(data[key], str):
             ctx[key] = data[key]
+    # Structured list fields
+    list_fields = ["characters_list", "locations", "timeline", "relationships",
+                   "motifs", "glossary", "themes_list"]
+    for key in list_fields:
+        if key in data and isinstance(data[key], list):
+            ctx[key] = data[key]
     save_project_context(project_id, ctx)
+    return _codex_response(ctx)
+
+
+
+# ---- AI chat sessions ------------------------------------------------------
+#
+# Each session is a JSON file at <project>/.sessions/<id>.json containing:
+#   {
+#     "id": "...",
+#     "title": "first message excerpt",
+#     "created_at": iso,
+#     "updated_at": iso,
+#     "messages": [{role, content, ts}, ...]
+#   }
+#
+# The "current" session for a project is stored in the project context
+# under "current_session". When the user opens a project, the current
+# session is loaded automatically. /new creates a new one; /list shows
+# all sessions; /switch changes the current.
+
+def get_sessions_dir(project_id: str) -> Path:
+    d = get_project_dir(project_id) / ".sessions"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _safe_session_id(s: str) -> str:
+    """Validate a session id: only allow safe chars, max 64."""
+    if not isinstance(s, str) or not s:
+        return ""
+    s = s[:64]
+    if not re.match(r"^[A-Za-z0-9_\-]+$", s):
+        return ""
+    return s
+
+
+def _session_meta(s: dict) -> dict:
+    """Return the session metadata without the full message list —
+    used for the list endpoint to keep payloads small."""
+    msgs = s.get("messages", [])
+    last_msg = msgs[-1] if msgs else None
+    last_excerpt = ""
+    if isinstance(last_msg, dict):
+        c = last_msg.get("content", "")
+        if isinstance(c, str):
+            last_excerpt = c[:80]
     return {
-        "characters": ctx.get("characters", ""),
-        "world": ctx.get("world", ""),
-        "summary": ctx.get("summary", ""),
-        "style": ctx.get("style", ""),
-        "plot": ctx.get("plot", ""),
-        "themes": ctx.get("themes", ""),
+        "id": s.get("id", ""),
+        "title": s.get("title", ""),
+        "created_at": s.get("created_at", ""),
+        "updated_at": s.get("updated_at", ""),
+        "message_count": len(msgs),
+        "last_excerpt": last_excerpt,
     }
+
+
+@app.route("/api/projects/<project_id>/sessions", methods=["GET"])
+def list_sessions(project_id):
+    """List all chat sessions for a project, newest first."""
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    sd = get_sessions_dir(project_id)
+    out = []
+    for f in sd.glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            out.append(_session_meta(data))
+        except Exception:
+            continue
+    out.sort(key=lambda s: s.get("updated_at", ""), reverse=True)
+    return {"sessions": out}
+
+
+@app.route("/api/projects/<project_id>/sessions", methods=["POST"])
+def create_session(project_id):
+    """Create a new chat session. Body: { title?: str, messages?: [...] }"""
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    data = safe_json()
+    sid = data.get("id") or f"ses_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}"
+    sid = _safe_session_id(sid)
+    if not sid:
+        return {"error": "invalid id"}, 400
+    sd = get_sessions_dir(project_id)
+    fp = sd / f"{sid}.json"
+    if fp.exists():
+        return {"error": "session already exists"}, 409
+    now = datetime.now().isoformat()
+    title = (data.get("title") or "New session").strip()[:120]
+    msgs = data.get("messages") or []
+    sess = {
+        "id": sid,
+        "title": title,
+        "created_at": now,
+        "updated_at": now,
+        "messages": msgs,
+    }
+    fp.write_text(json.dumps(sess, indent=2), encoding="utf-8")
+    # Make this the current session for the project
+    ctx = get_project_context(project_id)
+    ctx["current_session"] = sid
+    save_project_context(project_id, ctx)
+    return sess
+
+
+@app.route("/api/projects/<project_id>/sessions/<session_id>", methods=["GET"])
+def get_session(project_id, session_id):
+    """Load a full session with messages."""
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    sid = _safe_session_id(session_id)
+    if not sid:
+        return {"error": "invalid session id"}, 400
+    fp = get_sessions_dir(project_id) / f"{sid}.json"
+    if not fp.exists():
+        return {"error": "session not found"}, 404
+    try:
+        return json.loads(fp.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"error": f"failed to read: {e}"}, 500
+
+
+@app.route("/api/projects/<project_id>/sessions/<session_id>", methods=["PUT"])
+def update_session(project_id, session_id):
+    """Update a session's title and/or messages. Body: { title?, messages? }"""
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    sid = _safe_session_id(session_id)
+    if not sid:
+        return {"error": "invalid session id"}, 400
+    fp = get_sessions_dir(project_id) / f"{sid}.json"
+    if not fp.exists():
+        return {"error": "session not found"}, 404
+    data = safe_json()
+    try:
+        sess = json.loads(fp.read_text(encoding="utf-8"))
+    except Exception:
+        sess = {"id": sid, "title": "New session", "messages": []}
+    if "title" in data and isinstance(data["title"], str):
+        sess["title"] = data["title"].strip()[:120]
+    if "messages" in data and isinstance(data["messages"], list):
+        # Cap messages to last 200 to prevent runaway growth
+        sess["messages"] = data["messages"][-200:]
+    sess["updated_at"] = datetime.now().isoformat()
+    fp.write_text(json.dumps(sess, indent=2), encoding="utf-8")
+    return sess
+
+
+@app.route("/api/projects/<project_id>/sessions/<session_id>", methods=["DELETE"])
+def delete_session(project_id, session_id):
+    """Delete a session."""
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    sid = _safe_session_id(session_id)
+    if not sid:
+        return {"error": "invalid session id"}, 400
+    fp = get_sessions_dir(project_id) / f"{sid}.json"
+    if not fp.exists():
+        return {"error": "session not found"}, 404
+    fp.unlink()
+    # If this was the current session, clear the pointer
+    ctx = get_project_context(project_id)
+    if ctx.get("current_session") == sid:
+        ctx["current_session"] = ""
+        save_project_context(project_id, ctx)
+    return {"ok": True}
+
+
+@app.route("/api/projects/<project_id>/sessions/current", methods=["GET"])
+def get_current_session(project_id):
+    """Return the project's current session, or the most recent one if
+    no current pointer is set. Auto-creates an empty session if neither
+    exists so the user always has somewhere to chat."""
+    if not validate_project_id(project_id):
+        return {"error": "invalid project id"}, 400
+    ctx = get_project_context(project_id)
+    current_id = ctx.get("current_session")
+    sd = get_sessions_dir(project_id)
+    # If current_session pointer exists, load it
+    if current_id:
+        fp = sd / f"{current_id}.json"
+        if fp.exists():
+            try:
+                return json.loads(fp.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+    # Otherwise load the most recent session
+    sessions = []
+    for f in sd.glob("*.json"):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            sessions.append(d)
+        except Exception:
+            continue
+    if sessions:
+        sessions.sort(key=lambda s: s.get("updated_at", ""), reverse=True)
+        latest = sessions[0]
+        ctx["current_session"] = latest["id"]
+        save_project_context(project_id, ctx)
+        return latest
+    # No sessions at all — create an empty one
+    sid = f"ses_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}"
+    now = datetime.now().isoformat()
+    sess = {
+        "id": sid,
+        "title": "New session",
+        "created_at": now,
+        "updated_at": now,
+        "messages": [],
+    }
+    (sd / f"{sid}.json").write_text(json.dumps(sess, indent=2), encoding="utf-8")
+    ctx["current_session"] = sid
+    save_project_context(project_id, ctx)
+    return sess
 
 
 # ---- Session stats + writing goals -----------------------------------------

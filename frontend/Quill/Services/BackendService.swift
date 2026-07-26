@@ -120,7 +120,7 @@ actor BackendService {
         }
     }
 
-    func getRaw(_ path: String) async throws -> Data {
+    func getRawData(_ path: String) async throws -> Data {
         let req = try makeRequest(path: path, method: "GET")
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else {
@@ -131,6 +131,16 @@ actor BackendService {
             throw BackendError.httpError(http.statusCode, msg)
         }
         return data
+    }
+
+    /// Convenience: GET and parse the JSON body as `[String: Any]`.
+    /// Useful for endpoints that return mixed-shape payloads.
+    func getRaw(_ path: String) async throws -> [String: Any] {
+        let data = try await self.getRawData(path)
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return obj
     }
 
     func delete(_ path: String) async throws {
