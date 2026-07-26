@@ -645,8 +645,11 @@ class AppState: ObservableObject {
         if currentContent == lastSavedContent, !saveState.isError { return }
         saveInFlight = true
         defer { saveInFlight = false }
-        autosaveTask?.cancel()
-        trailingSaveTask?.cancel()
+        // Do NOT cancel autosaveTask/trailingSaveTask here — this method
+        // is OFTEN running inside one of them. Cancelling the current
+        // task cancels its URLSessionTask, which throws URLError -999
+        // ("cancelled") and produces the noisy "Save failed: HTTP -999"
+        // toast. The debounce / trailing tasks are self-managing.
         let previousState = saveState
         // Capture the content we're about to save so we can detect later
         // changes that happened during the save.
@@ -1295,6 +1298,37 @@ class AppState: ObservableObject {
                                 ? "✓ Email sent to \((email["to"] as? [String])?.first ?? "")"
                                 : "✗ Email failed: \(email["error"] ?? "unknown")"
                             self.messages.append(ChatMessage(role: .system, content: summary))
+                        }
+                        // If the AI used the write_chapter tool (or any tool
+                        // that mutates a chapter file), refresh the editor
+                        // so the user sees the new content immediately.
+                        if let toolsUsed = meta["tools_used"] as? [[String: Any]] {
+                            let writeChapters = toolsUsed.compactMap { entry -> String? in
+                                guard let name = entry["name"] as? String,
+                                      name == "write_chapter" else { return nil }
+                                let args = entry["args"] as? [String: Any] ?? [:]
+                                return (args["chapter"] as? String) ?? (args["name"] as? String)
+                            }
+                            if !writeChapters.isEmpty {
+                                // Reload chapters and switch to the first one
+                                // the AI wrote (most recent write wins).
+                                let target = writeChapters.last!
+                                print("[Quill] AI used write_chapter for: \(target) — refreshing")
+                                if self.chapters.isEmpty {
+                                    await self.loadChapters()
+                                }
+                                if let ch = self.chapters.first(where: { $0.name == target }) {
+                                    await self.selectChapter(ch)
+                                } else {
+                                    await self.loadChapters()
+                                    if let ch = self.chapters.first(where: { $0.name == target }) {
+                                        await self.selectChapter(ch)
+                                    }
+                                }
+                                let summary = "✓ Quill wrote to `\(target).md` via the `write_chapter` tool."
+                                self.messages.append(ChatMessage(role: .system, content: summary))
+                                ToastCenter.shared.postSuccess("Saved \(target).md")
+                            }
                         }
                     }
                 },
