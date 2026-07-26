@@ -270,7 +270,13 @@ class AppState: ObservableObject {
     // Autosave debounce
     private var autosaveTask: Task<Void, Never>?
     private static let autosaveDelayNanos: UInt64 = 2_000_000_000  // 2s
+    private static let autosaveMaxDelayNanos: UInt64 = 30_000_000_000  // 30s — trailing save
     private static let savedIndicatorNanos: UInt64 = 2_000_000_000  // how long "saved" stays visible
+
+    /// Tracks when the user last typed. Used to enforce a trailing-save
+    /// so we never go more than 30s without persisting, even if the user
+    /// is typing continuously.
+    private var lastTypedAt: Date = .distantPast
 
     /// True while a saveNow() is currently executing. Used to coalesce
     /// concurrent save requests (e.g. autosave + manual save racing).
@@ -448,6 +454,7 @@ class AppState: ObservableObject {
         currentScene = nil
         sceneContent = ""
         autosaveTask?.cancel()
+        trailingSaveTask?.cancel()
         saveState = .idle
         wordCount = 0
         lastSavedContent = ""
@@ -548,6 +555,7 @@ class AppState: ObservableObject {
             )
             chapterContent = content.content
             autosaveTask?.cancel()
+            trailingSaveTask?.cancel()
             saveState = .idle
             lastSavedContent = content.content
             updateWordCount()
@@ -562,24 +570,53 @@ class AppState: ObservableObject {
         // Don't downgrade saving → dirty
         if case .saving = saveState { return }
         saveState = .dirty
+        lastTypedAt = Date()
         scheduleAutosave()
     }
 
     /// Schedule a debounced autosave. If a save is already scheduled, it
     /// is cancelled and rescheduled — so quick typing batches into one save.
+    ///
+    /// Trailing-save: a separate task also fires after autosaveMaxDelay
+    /// (30s) so we never go more than 30s without persisting, even if the
+    /// user is typing continuously. This is the "kill switch" that
+    /// guarantees the user's work hits disk eventually.
     func scheduleAutosave() {
         autosaveTask?.cancel()
+        let typedAt = lastTypedAt
         autosaveTask = Task { [weak self] in
+            // First wait: the debounce window (2s after the LAST keystroke)
             try? await Task.sleep(nanoseconds: AppState.autosaveDelayNanos)
             guard !Task.isCancelled else { return }
+            // If the user typed more during the debounce, defer to the
+            // trailing-save timer below.
+            if let self = self, self.lastTypedAt > typedAt { return }
             await self?.saveNow()
         }
+        // Trailing-save: fires 30s after the LAST markDirty call, no matter what
+        trailingSaveTask?.cancel()
+        trailingSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: AppState.autosaveMaxDelayNanos)
+            guard !Task.isCancelled else { return }
+            guard let self = self else { return }
+            let currentContent = self.currentScene != nil ? self.sceneContent : self.chapterContent
+            if currentContent == self.lastSavedContent { return }
+            if self.saveState.isError || self.saveState == .dirty {
+                await self.saveNow()
+            }
+        }
     }
+
+    /// Separate task for the 30s trailing-save kill switch. Runs in
+    /// parallel with `autosaveTask` and survives debounce cancellations.
+    private var trailingSaveTask: Task<Void, Never>?
 
     /// Cancel any pending autosave without saving.
     func cancelAutosave() {
         autosaveTask?.cancel()
         autosaveTask = nil
+        trailingSaveTask?.cancel()
+        trailingSaveTask = nil
     }
 
     /// Save the current chapter (or scene) immediately. Updates saveState
@@ -609,6 +646,7 @@ class AppState: ObservableObject {
         saveInFlight = true
         defer { saveInFlight = false }
         autosaveTask?.cancel()
+        trailingSaveTask?.cancel()
         let previousState = saveState
         // Capture the content we're about to save so we can detect later
         // changes that happened during the save.
@@ -906,6 +944,7 @@ class AppState: ObservableObject {
             currentScene = scene
             sceneContent = content.content
             autosaveTask?.cancel()
+            trailingSaveTask?.cancel()
             saveState = .idle
             lastSavedContent = content.content
         } catch {
