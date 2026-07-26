@@ -272,6 +272,16 @@ struct SidebarView: View {
                     .foregroundColor(state.currentChapter?.id == chapter.id ? textPrimary : textSecondary)
                     .lineLimit(1)
                 Spacer()
+                // Word-count badge — rough estimate from file size
+                if chapter.size > 0 {
+                    Text(Self.estimateWords(chapter.size))
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(textMuted.opacity(0.7))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(bg.opacity(0.5))
+                        .cornerRadius(2)
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -352,6 +362,17 @@ struct SidebarView: View {
     }
 
     // MARK: - Path helpers
+
+    /// Rough word-count estimate from file size in bytes. Avg prose is
+    /// ~5.5 chars/word including spaces, but a markdown file is heavier
+    /// on punctuation so we use 6. Used for the chapter-list badge.
+    static func estimateWords(_ bytes: Int) -> String {
+        let words = max(0, bytes / 6)
+        if words >= 1000 {
+            return String(format: "%.1fk", Double(words) / 1000.0)
+        }
+        return "\(words)w"
+    }
 
     private func chapterPath(_ chapter: Chapter) -> String? {
         guard let project = state.currentProject else { return nil }

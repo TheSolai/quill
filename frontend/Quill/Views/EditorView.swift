@@ -40,6 +40,19 @@ struct EditorView: View {
                     Text(chapter.name)
                         .font(.system(size: 13, weight: .semibold, design: .monospaced))
                         .foregroundColor(textPrimary)
+                    // Inline word count badge for the open chapter
+                    if state.wordCount > 0 {
+                        Text("·")
+                            .foregroundColor(textMuted)
+                        Text("\(state.wordCount.formatted()) words")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(textMuted)
+                        Text("·")
+                            .foregroundColor(textMuted)
+                        Text(readingTime)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(textMuted)
+                    }
                     if let scene = state.currentScene {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 10))
@@ -469,13 +482,36 @@ struct EditorView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "doc.text")
-                .font(.system(size: 48))
-                .foregroundColor(textMuted.opacity(0.4))
-            Text("Select a chapter from the sidebar")
-                .font(.system(size: 13))
-                .foregroundColor(textMuted)
+        VStack(spacing: 16) {
+            Image(systemName: "book.pages")
+                .font(.system(size: 56))
+                .foregroundColor(textMuted.opacity(0.35))
+            VStack(spacing: 6) {
+                Text(state.currentProject == nil
+                     ? "Welcome to Quill"
+                     : "No chapter open")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(textPrimary)
+                Text(state.currentProject == nil
+                     ? "Create a project from the sidebar to start writing."
+                     : "Click **+** above CHAPTERS, or right-click in the sidebar to create one.")
+                    .font(.system(size: 12))
+                    .foregroundColor(textMuted)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+            }
+            if state.currentProject == nil {
+                Button(action: { AppCommandsState.shared.showNewProject = true }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus.circle.fill")
+                        Text("New Project…")
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+                .keyboardShortcut("n", modifiers: .command)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(bgPrimary)

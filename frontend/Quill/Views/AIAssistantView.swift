@@ -226,13 +226,19 @@ struct AIAssistantView: View {
                     content: """
                     👋 I'm Quill — your writing partner.
 
-                    **Long form mode** (default): I'll write full chapters using a multi-pass approach — scene generation, sensory enhancement, character tracking, and narrative summary updates.
+                    **Short form mode** (default): Quick chat for brainstorming, plot questions, character development, feedback. Switch to **Long form** for multi-pass chapter generation.
 
-                    **Short form mode**: Quick chat for brainstorming, plot questions, character development, feedback.
+                    Try: *write chapter 3* · *extend @chapter-1* · */extract* · */bible list*
 
-                    Try: *write chapter 3* or *what are the best plot twists for chapter 2?*
+                    Your sessions are saved automatically — use the chat-bubble menu in the header to switch back to past conversations.
                     """
                 ))
+            }
+            // Focus the chat input so the writer can start typing immediately.
+            // (Skipped on subsequent re-appearances if the user is reading
+            // a long response — we only focus when input is empty.)
+            if inputText.isEmpty && !state.isStreaming {
+                chatFocusToken &+= 1
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .sendToAI)) { note in

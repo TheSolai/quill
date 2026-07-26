@@ -284,6 +284,34 @@ struct StoryGlossaryEntry: Codable, Identifiable, Equatable {
     }
 }
 
+extension Codex {
+    /// Total number of structured entries across all list fields. Shown in
+    /// the Story Bible header pill as a quick "how much lore do I have"
+    /// indicator.
+    var populationCount: Int {
+        charactersList.count + locations.count + timeline.count
+        + relationships.count + motifs.count + glossary.count
+    }
+
+    /// True if any field has structured content. Used to decide whether
+    /// to show the empty state.
+    var hasContent: Bool {
+        populationCount > 0
+            || !characters.isEmpty
+            || !world.isEmpty
+            || !summary.isEmpty
+            || !style.isEmpty
+            || !plot.isEmpty
+            || !themes.isEmpty
+            || !tone.isEmpty
+            || !pov.isEmpty
+            || !tense.isEmpty
+            || !incitingIncident.isEmpty
+            || !climax.isEmpty
+            || !resolution.isEmpty
+    }
+}
+
 // MARK: - Helpers for dict-shaped API responses
 //
 // The backend returns Story Bible entries as raw dicts (since they're
@@ -1639,7 +1667,10 @@ class AppState: ObservableObject {
     }
 
     func updateWordCount() {
-        let words = chapterContent
+        // Count words from whichever content is currently active. If a
+        // scene is selected, count its content; otherwise the chapter's.
+        let source = currentScene != nil ? sceneContent : chapterContent
+        let words = source
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
         wordCount = words.count
