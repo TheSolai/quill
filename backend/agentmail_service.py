@@ -169,14 +169,24 @@ def send_email(
     if labels:
         payload["labels"] = labels
     if attachments:
-        from agentmail import Attachment
+        # We bypass the SDK's Attachment pydantic model because recent
+        # versions require `attachment_id` and `size` fields we don't
+        # have at this point. We pass the attachment as a raw dict —
+        # the AgentMail HTTP API is happy with just filename + content
+        # (base64-encoded).
+        import base64
         atts = []
         for a in attachments:
             content = a.get("content")
             if isinstance(content, str):
-                import base64
-                content = base64.b64decode(content)
-            atts.append(Attachment(filename=a["filename"], content=content))
+                # already a base64 string from the caller
+                content_b64 = content
+            else:
+                content_b64 = base64.b64encode(content).decode("ascii")
+            atts.append({
+                "filename": a["filename"],
+                "content": content_b64,
+            })
         payload["attachments"] = atts
 
     try:
@@ -291,6 +301,97 @@ def parse_email_intent(text: str) -> Optional[dict]:
     return {"to": to, "what": what, "subject": subject}
 
 
+# --------------------------------------------------------------------------
+# Mail-the-X natural language parser (book / chapter / compiled / zip)
+# --------------------------------------------------------------------------
+#
+# Matches the four "panic button" actions:
+#   "mail me the book"           -> action="book",    to=<recipient or me>
+#   "mail me chapter 3"          -> action="chapter", chapter="3"
+#   "mail me the compiled book"  -> action="compiled", format="pdf" (or "epub"/"docx")
+#   "mail me a zip"              -> action="zip"
+#
+# Returns: {"action": str, "to": str|None, "chapter": str|None,
+#           "format": str|None} or None if no match.
+#
+# "to" is required for a real send; the AI follow-up will ask for it
+# if missing.
+
+# "to me" is a special recipient (defaults to the user's primary email —
+# the AI follow-up will fill it in if the user really meant that).
+ME_RECIPIENT_RE = re.compile(r"\bto\s+me\b", re.IGNORECASE)
+TO_RE_LOOSE = re.compile(
+    r"(?:to|→|for|at)\s+([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",
+    re.IGNORECASE,
+)
+COMPILED_FORMAT_RE = re.compile(
+    r"\b(pdf|epub|docx|html|markdown|md|txt|rtf)\b", re.IGNORECASE
+)
+
+
+def parse_mail_action(text: str) -> Optional[dict]:
+    """Try to extract a "mail me the X" command from natural language.
+
+    Returns: {"action": "book"|"chapter"|"compiled"|"zip",
+              "to": str|None,
+              "chapter": str|None,
+              "format": str|None} or None.
+    """
+    if not text:
+        return None
+    lower = text.lower()
+    if not re.search(r"\b(mail|email|send)\b", lower):
+        return None
+
+    # Find recipient — check the explicit email pattern first so that
+    # "to me@x.com" doesn't get caught by the "to me" shortcut.
+    to: Optional[str] = None
+    m = TO_RE_LOOSE.search(text)
+    if m:
+        to = m.group(1)
+    elif ME_RECIPIENT_RE.search(text):
+        to = "me"  # placeholder — the AI follow-up will fill in
+
+    # Find action. Order matters: more specific (zip, compiled) before
+    # the broader (book, chapter) to avoid "mail me the compiled book"
+    # being misread as "book".
+    action: Optional[str] = None
+    chapter: Optional[str] = None
+    fmt: Optional[str] = None
+
+    if re.search(r"\bzip\b|\bbundle\b", lower):
+        action = "zip"
+    elif re.search(r"\bcompiled\b|\bpdf\b|\bepub\b|\bdocx\b", lower):
+        action = "compiled"
+        mfmt = COMPILED_FORMAT_RE.search(text)
+        if mfmt:
+            fmt = mfmt.group(1).lower()
+            if fmt == "md":
+                fmt = "markdown"
+        else:
+            fmt = "pdf"  # default for compiled
+    else:
+        # Book vs chapter
+        m = re.search(r"\bchapter\s+([A-Za-z0-9._-]+)\b", text, re.IGNORECASE)
+        if m:
+            action = "chapter"
+            chapter = m.group(1)
+        elif re.search(r"\bbook\b|\bwhole\s+book\b|\bmanuscript\b", lower):
+            action = "book"
+        else:
+            # Default fallback: "mail me X" with no qualifier = book
+            action = "book"
+
+    if action is None:
+        return None
+    return {
+        "action": action,
+        "to": to,
+        "chapter": chapter,
+        "format": fmt,
+    }
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "test":
@@ -309,5 +410,8 @@ if __name__ == "__main__":
         text = sys.argv[4] if len(sys.argv) > 4 else "Hello from Dross via Quill."
         result = send_email(to=to, subject=subject, text=text)
         print(result)
+    elif len(sys.argv) > 1 and sys.argv[1] == "parse-mail":
+        text = " ".join(sys.argv[2:])
+        print(parse_mail_action(text))
     else:
-        print("Usage: python agentmail_service.py [test|send <to> <subject> <text>]")
+        print("Usage: python agentmail_service.py [test|send|parse-mail]")

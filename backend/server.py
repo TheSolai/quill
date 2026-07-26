@@ -475,9 +475,50 @@ def chat_completion():
     # Natural language email intent: intercept simple "email X to Y" patterns
     last_user = next((m["content"] for m in reversed(messages)
                        if m.get("role") == "user"), "")
+
+    # Mail-the-X intent: "mail me the book", "mail chapter 3 to me",
+    # "mail me a zip of the project", "mail me the PDF". This runs FIRST
+    # because the regex is more specific than the generic email_intent
+    # below and gives a much better experience (HTML email + .md
+    # attachment, picked format, etc.).
+    mail_intent = _agentmail.parse_mail_action(last_user) if last_user else None
+    if mail_intent and _agentmail.is_available():
+        result = _handle_mail_action(mail_intent, project_id)
+        if data.get("stream", True):
+            def gen_mail():
+                if result.get("ok"):
+                    action = mail_intent.get("action", "send")
+                    msg = result.get("message_id") or result.get("subject", "(sent)")
+                    payload = (
+                        f"{action.capitalize()} sent. "
+                        f"Message id: {msg}. "
+                        f"Check your inbox."
+                    )
+                else:
+                    payload = f"Mail failed: {result.get('error', 'unknown')}"
+                yield f"data: {json.dumps({'token': payload, 'slot_id': slot_id})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'slot_id': slot_id, 'mail': result})}\n\n"
+            return Response(gen_mail(), mimetype="text/event-stream",
+                            headers={"Cache-Control": "no-cache"})
+        return {"text": "", "slot_id": slot_id,
+                "mail": result, "messages": messages}
+
+    # Generic email intent (fallback): "email X to Y@z" for ad-hoc sends.
     email_intent = _agentmail.parse_email_intent(last_user) if last_user else None
     if email_intent and _agentmail.is_available():
         result = _handle_email_intent(email_intent, project_id)
+        if data.get("stream", True):
+            def gen_email():
+                if result.get("ok"):
+                    payload = f"Email sent to {result['to']} — subject: {result.get('subject', '(none)')}"
+                else:
+                    payload = f"Email failed: {result.get('error', 'unknown')}"
+                yield f"data: {json.dumps({'token': payload, 'slot_id': slot_id})}\n\n"
+                yield f"data: {json.dumps({'done': True, 'slot_id': slot_id, 'email': result})}\n\n"
+            return Response(gen_email(), mimetype="text/event-stream",
+                            headers={"Cache-Control": "no-cache"})
+        return {"text": result.get("message", ""), "slot_id": slot_id,
+                "email": result, "messages": messages}
         if data.get("stream", True):
             def gen_email():
                 if result.get("ok"):
@@ -1374,6 +1415,291 @@ def _handle_email_intent(intent: dict, project_id: str) -> dict:
     return _agentmail.send_email(to=to, subject=subject, text=text)
 
 
+def _handle_mail_action(intent: dict, project_id: str) -> dict:
+    """Dispatch a parsed `parse_mail_action` to the right email-the-X
+    endpoint by calling the underlying function directly (avoids the
+    in-process HTTP loopback that doesn't work in test mode and is
+    slower anyway).
+
+    Intent shape: {action, to, chapter, format}.
+    """
+    action = intent.get("action")
+    to = intent.get("to")
+    if not to or to == "me":
+        return {
+            "ok": False,
+            "error": "I need an email address to send to. Try: 'mail me the book to you@example.com'",
+        }
+    chapter = intent.get("chapter")
+    fmt = intent.get("format")
+
+    if action == "chapter":
+        if not chapter:
+            ctx = get_project_context(project_id)
+            chapter = ctx.get("current_chapter") or ""
+        if not chapter:
+            return {"ok": False, "error": "no chapter name and no current chapter to send"}
+        result = email_the_chapter_inner(project_id, to=to, chapter=chapter, fmt="md")
+    elif action == "compiled":
+        result = email_compiled_inner(project_id, to=to, fmt=fmt or "pdf")
+    elif action == "zip":
+        result = email_zip_inner(project_id, to=to)
+    else:  # book
+        result = email_the_book_inner(project_id, to=to, fmt="html")
+
+    if isinstance(result, tuple):
+        # Flask returned (body, status_code)
+        result = result[0] if result else {"ok": False, "error": "no result"}
+    if isinstance(result, dict):
+        result["action"] = action
+        result["to"] = to
+    return result
+
+
+# --- Inner helpers: the actual send logic, extracted from the HTTP
+# route handlers so the chat-routing dispatcher can call them directly
+# without re-entering the Flask request cycle (avoids the in-process
+# HTTP loopback problem and makes them testable). ---
+
+
+def email_the_book_inner(project_id, to: str, fmt: str = "html",
+                         include_attachments: bool = True,
+                         dry_run: bool = False) -> dict:
+    """Bundle the project and (optionally) email it. Returns a dict that
+    matches the /api/projects/<id>/email-the-book JSON response."""
+    proj_dir_check = BASE_DIR / project_id
+    if not proj_dir_check.is_dir():
+        return {"error": f"project {project_id!r} not found"}, 404
+    try:
+        compiled, title, ctx, included = compile_book(project_id)
+    except Exception as e:
+        return {"error": f"could not compile book: {e}"}, 500
+    if not included:
+        return {"error": "no chapters in this project — nothing to mail"}, 400
+    settings = ctx.get("settings", {}) or {}
+    title = settings.get("title") or title or project_id
+    author = settings.get("author") or ctx.get("author", "Anonymous")
+    word_count = len((compiled or "").split())
+    date_str = time.strftime("%Y-%m-%d")
+    subject = f"{title} — {date_str} ({word_count} words)"
+
+    if fmt == "html":
+        try:
+            html_body = build_html_document(title, author, markdown_to_html(compiled), ctx)
+            text_body = None
+        except Exception as e:
+            return {"error": f"html render failed: {e}"}, 500
+    else:
+        text_body = f"# {title}\n\nby {author}\n\n\n" + compiled
+        html_body = None
+
+    safe_title = re.sub(r"[^A-Za-z0-9._-]+", "_", title).strip("_") or "book"
+    send_args = {"to": to, "subject": subject}
+    if text_body is not None:
+        send_args["text"] = text_body
+    if html_body is not None:
+        send_args["html"] = html_body
+    if include_attachments:
+        attach_text = (text_body or html_body or "")
+        send_args["attachments"] = [
+            {"filename": f"{safe_title}.md",
+             "content": (f"# {title}\n\nby {author}\n\n\n" + compiled).encode("utf-8")}
+        ]
+    if dry_run:
+        return {
+            "ok": True, "dry_run": True,
+            "would_send_to": to, "subject": subject,
+            "attachment_filename": f"{safe_title}.md" if include_attachments else None,
+            "book": {"title": title, "author": author, "words": word_count,
+                     "format": fmt, "size_bytes": len((text_body or html_body or "").encode("utf-8"))},
+        }
+    result = _agentmail.send_email(**send_args)
+    if not result.get("ok"):
+        return result, 500
+    result["book"] = {
+        "title": title, "author": author, "words": word_count,
+        "format": fmt, "size_bytes": len((text_body or html_body or "").encode("utf-8")),
+    }
+    return result
+
+
+def email_the_chapter_inner(project_id, to: str, chapter: str,
+                            fmt: str = "md", include_attachments: bool = True,
+                            dry_run: bool = False) -> dict:
+    """Bundle a single chapter and (optionally) email it."""
+    proj_dir_check = BASE_DIR / project_id
+    if not proj_dir_check.is_dir():
+        return {"error": f"project {project_id!r} not found"}, 404
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", str(chapter)).strip("-")
+    if not safe_stem:
+        return {"error": "invalid chapter name"}, 400
+    chapter_path = proj_dir_check / f"{safe_stem}.md"
+    if not chapter_path.is_file():
+        return {"error": f"chapter {chapter!r} not found in project"}, 404
+    chapter_text = chapter_path.read_text(encoding="utf-8", errors="replace")
+    word_count = len(chapter_text.split())
+    ctx = get_project_context(project_id)
+    settings = ctx.get("settings", {}) or {}
+    title = settings.get("title") or ctx.get("title") or project_id
+    author = settings.get("author") or ctx.get("author", "Anonymous")
+    if fmt == "html":
+        try:
+            html_body = build_html_document(title, author, markdown_to_html(chapter_text), ctx)
+            text_body = None
+        except Exception as e:
+            return {"error": f"html render failed: {e}"}, 500
+    else:
+        text_body = chapter_text
+        html_body = None
+    date_str = time.strftime("%Y-%m-%d")
+    subject = f"{title} — {safe_stem} — {date_str} ({word_count} words)"
+    send_args = {"to": to, "subject": subject}
+    if text_body is not None:
+        send_args["text"] = text_body
+    if html_body is not None:
+        send_args["html"] = html_body
+    if include_attachments:
+        send_args["attachments"] = [
+            {"filename": f"{safe_stem}.md", "content": chapter_text.encode("utf-8")}
+        ]
+    if dry_run:
+        return {
+            "ok": True, "dry_run": True,
+            "would_send_to": to, "subject": subject,
+            "attachment_filename": f"{safe_stem}.md" if include_attachments else None,
+            "chapter": {"name": safe_stem, "words": word_count, "format": fmt,
+                        "size_bytes": len((text_body or html_body or "").encode("utf-8"))},
+        }
+    result = _agentmail.send_email(**send_args)
+    if not result.get("ok"):
+        return result, 500
+    result["chapter"] = {"name": safe_stem, "words": word_count, "format": fmt,
+                         "size_bytes": len((text_body or html_body or "").encode("utf-8"))}
+    return result
+
+
+def email_compiled_inner(project_id, to: str, fmt: str = "pdf",
+                         dry_run: bool = False) -> dict:
+    """Build the compiled book and (optionally) email it as an attachment."""
+    proj_dir_check = BASE_DIR / project_id
+    if not proj_dir_check.is_dir():
+        return {"error": f"project {project_id!r} not found"}, 404
+    try:
+        compiled, _, ctx, chapter_count = compile_book(project_id)
+    except Exception as e:
+        return {"error": f"could not compile book: {e}"}, 500
+    if not chapter_count:
+        return {"error": "no chapters in this project — nothing to mail"}, 400
+    settings = ctx.get("settings", {}) or {}
+    title = settings.get("title") or ctx.get("title") or project_id
+    author = settings.get("author") or ctx.get("author", "Anonymous")
+    word_count = len((compiled or "").split())
+    safe_title = re.sub(r"[^A-Za-z0-9._-]+", "_", title).strip("_") or "book"
+    attachment_bytes, attachment_ext, _ = _build_compiled_attachment(
+        project_id, compiled, title, author, ctx, fmt
+    )
+    if attachment_bytes is None:
+        return {"error": f"could not build {fmt} attachment (is pandoc installed?)"}, 500
+    body_text = (
+        f"Attached: {title} ({word_count} words, {chapter_count} chapter{'s' if chapter_count != 1 else ''})\n\n"
+        f"Format: {fmt.upper()}\n"
+        f"Author: {author}\n"
+        f"Sent from Quill on {time.strftime('%Y-%m-%d')}.\n\n"
+        f"Open the attachment to read the full book."
+    )
+    body_html = (
+        f"<h2>{title}</h2>"
+        f"<p><b>Format:</b> {fmt.upper()} &middot; <b>Words:</b> {word_count} &middot; <b>Chapters:</b> {chapter_count}</p>"
+        f"<p>Open the attached file to read the full book.</p>"
+    )
+    subject = f"{title} ({fmt.upper()}) — {time.strftime('%Y-%m-%d')}"
+    send_args = {
+        "to": to, "subject": subject, "text": body_text, "html": body_html,
+        "attachments": [
+            {"filename": f"{safe_title}.{attachment_ext}", "content": attachment_bytes}
+        ],
+    }
+    if dry_run:
+        return {
+            "ok": True, "dry_run": True,
+            "would_send_to": to, "subject": subject,
+            "attachment_filename": f"{safe_title}.{attachment_ext}",
+            "attachment_size_bytes": len(attachment_bytes),
+            "book": {"title": title, "author": author, "words": word_count,
+                     "format": fmt, "chapters": chapter_count},
+        }
+    result = _agentmail.send_email(**send_args)
+    if not result.get("ok"):
+        return result, 500
+    result["book"] = {"title": title, "author": author, "words": word_count,
+                      "format": fmt, "chapters": chapter_count,
+                      "attachment_size_bytes": len(attachment_bytes)}
+    return result
+
+
+def email_zip_inner(project_id, to: str, dry_run: bool = False) -> dict:
+    """Build a zip bundle of the project and (optionally) email it."""
+    proj_dir_check = BASE_DIR / project_id
+    if not proj_dir_check.is_dir():
+        return {"error": f"project {project_id!r} not found"}, 404
+    import zipfile
+    project_dir = get_project_dir(project_id)
+    ctx = get_project_context(project_id)
+    settings = ctx.get("settings", {}) or {}
+    title = settings.get("title") or ctx.get("title") or project_id
+    author = settings.get("author") or ctx.get("author", "Anonymous")
+    chapter_files = sorted(
+        [f for f in project_dir.glob("*.md") if not f.stem.startswith(".")],
+        key=lambda p: natural_sort_key(p.stem),
+    )
+    if not chapter_files:
+        return {"error": "no chapters in this project — nothing to mail"}, 400
+    word_count = 0
+    for f in chapter_files:
+        word_count += len(f.read_text(encoding="utf-8", errors="replace").split())
+    safe_title = re.sub(r"[^A-Za-z0-9._-]+", "_", title).strip("_") or "book"
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("manifest.json", json.dumps({
+            "title": title, "author": author,
+            "genre": settings.get("genre", ""),
+            "exported_at": datetime.now().isoformat(),
+            "word_count": word_count, "chapter_count": len(chapter_files),
+        }, indent=2))
+        z.writestr("README.md", f"# {title}\n\nBy {author}\n\n"
+                       f"Genre: {settings.get('genre', 'unspecified')}\n\n"
+                       f"Exported from Quill on {datetime.now().strftime('%B %d, %Y')}.\n")
+        for f in chapter_files:
+            z.write(f, f.name)
+    zip_bytes = buf.getvalue()
+    body_text = (
+        f"Attached: {title} (zip bundle, {word_count} words, "
+        f"{len(chapter_files)} chapter{'s' if len(chapter_files) != 1 else ''})\n\n"
+        f"The zip contains every .md chapter file plus a manifest and README. "
+        f"Unzip and open README.md to start reading."
+    )
+    subject = f"{title} — zip bundle — {time.strftime('%Y-%m-%d')}"
+    if dry_run:
+        return {
+            "ok": True, "dry_run": True,
+            "would_send_to": to, "subject": subject,
+            "attachment_filename": f"{safe_title}_bundle.zip",
+            "attachment_size_bytes": len(zip_bytes),
+            "book": {"title": title, "author": author, "words": word_count,
+                     "chapters": len(chapter_files)},
+        }
+    result = _agentmail.send_email(
+        to=to, subject=subject, text=body_text,
+        attachments=[{"filename": f"{safe_title}_bundle.zip", "content": zip_bytes}],
+    )
+    if not result.get("ok"):
+        return result, 500
+    result["book"] = {"title": title, "author": author, "words": word_count,
+                      "chapters": len(chapter_files),
+                      "attachment_size_bytes": len(zip_bytes)}
+    return result
+
+
 # --------------------------------------------------------------------------
 # Chapter-write intent: when the user asks Dross to "write chapter X" or
 # "draft this chapter", the AI's response is automatically written to the
@@ -1846,84 +2172,144 @@ def email_the_book(project_id):
     fmt = (data.get("format") or "html").lower()
     if fmt not in ("md", "html"):
         return {"error": f"format must be 'md' or 'html', got {fmt!r}"}, 400
-    include_attachments = bool(data.get("include_attachments", True))
+    result = email_the_book_inner(
+        project_id,
+        to=to,
+        fmt=fmt,
+        include_attachments=bool(data.get("include_attachments", True)),
+        dry_run=bool(data.get("dry_run", False)),
+    )
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], int):
+        return result
+    return result
 
-    # 1. Load the project (re-uses the compile pipeline that powers exports)
-    # Use a non-creating lookup first so we can return 404 cleanly without
-    # the auto-mkdir in get_project_dir() materialising an empty project.
-    proj_dir_check = BASE_DIR / project_id
-    if not proj_dir_check.is_dir():
-        return {"error": f"project {project_id!r} not found"}, 404
-    try:
-        compiled, title, ctx, included = compile_book(project_id)
-    except Exception as e:
-        return {"error": f"could not compile book: {e}"}, 500
-    if not included:
-        return {"error": "no chapters in this project — nothing to mail"}, 400
-    settings = ctx.get("settings", {}) or {}
-    title = settings.get("title") or title or project_id
-    author = settings.get("author") or ctx.get("author", "Anonymous")
 
-    # 2. Build the body
-    word_count = len((compiled or "").split())
-    if fmt == "html":
-        try:
-            html_body_only = markdown_to_html(compiled)
-            html_body = build_html_document(title, author, html_body_only, ctx)
-        except Exception as e:
-            return {"error": f"html render failed: {e}"}, 500
-        text_body = None
-    else:  # md
-        text_body = f"# {title}\n\nby {author}\n\n\n" + compiled
-        html_body = None
+@app.route("/api/projects/<project_id>/email-the-chapter", methods=["POST"])
+def email_the_chapter(project_id):
+    """Failsafe: email a single chapter.
 
-    # 3. Build the subject
-    date_str = time.strftime("%Y-%m-%d")
-    subject = f"{title} — {date_str} ({word_count} words)"
+    Body: {"to": "...", "chapter": "chapter-1", "dry_run": bool, "include_attachments": bool}
+    The chapter content is rendered as the body (HTML or markdown) and
+    attached as a .md file by default.
+    """
+    if not _agentmail.is_available():
+        return {"error": _agentmail.last_error() or "AgentMail unavailable"}, 503
+    data = safe_json()
+    to = data.get("to")
+    chapter_name = data.get("chapter")
+    if not to:
+        return {"error": "to is required"}, 400
+    if not chapter_name:
+        return {"error": "chapter is required"}, 400
+    fmt = (data.get("format") or "md").lower()
+    if fmt not in ("md", "html"):
+        return {"error": f"format must be 'md' or 'html', got {fmt!r}"}, 400
+    result = email_the_chapter_inner(
+        project_id,
+        to=to,
+        chapter=chapter_name,
+        fmt=fmt,
+        include_attachments=bool(data.get("include_attachments", True)),
+        dry_run=bool(data.get("dry_run", False)),
+    )
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], int):
+        return result
+    return result
 
-    # 4. Send via agentmail (or dry-run)
-    dry_run = bool(data.get("dry_run", False))
-    send_args = {"to": to, "subject": subject}
-    if text_body is not None:
-        send_args["text"] = text_body
-    if html_body is not None:
-        send_args["html"] = html_body
-    if include_attachments:
-        # Always attach a .md copy so the writer can recover plain text
+
+@app.route("/api/projects/<project_id>/email-compiled", methods=["POST"])
+def email_compiled(project_id):
+    """Failsafe: email the compiled book (PDF/EPUB/DOCX) as an attachment.
+
+    Body: {"to": "...", "format": "pdf"|"epub"|"docx"|"html"|"md",
+           "dry_run": bool, "include_body": bool}
+
+    The compiled book is built in-memory and sent as an attachment. The
+    email body itself is a short summary (book title + word count +
+    chapter list) so the recipient knows what the attachment is.
+    """
+    if not _agentmail.is_available():
+        return {"error": _agentmail.last_error() or "AgentMail unavailable"}, 503
+    data = safe_json()
+    to = data.get("to")
+    if not to:
+        return {"error": "to is required"}, 400
+    fmt = (data.get("format") or "pdf").lower()
+    if fmt not in ("pdf", "epub", "docx", "html", "md", "txt", "rtf"):
+        return {"error": f"format must be pdf|epub|docx|html|md|txt|rtf, got {fmt!r}"}, 400
+    result = email_compiled_inner(
+        project_id, to=to, fmt=fmt, dry_run=bool(data.get("dry_run", False))
+    )
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], int):
+        return result
+    return result
+
+
+def _build_compiled_attachment(project_id, compiled, title, author, ctx, fmt):
+    """Build an in-memory attachment for the given format. Returns
+    (bytes, extension, mime) or (None, None, None) on failure.
+
+    For PDF/EPUB/DOCX/RTF we shell out to pandoc (matches the export
+    endpoint). For plain formats we return the compiled text directly.
+    """
+    safe_title = re.sub(r"[^A-Za-z0-9._-]+", "_", title).strip("_") or "book"
+    project_dir = get_project_dir(project_id)
+    exports_dir = project_dir / "exports"
+    exports_dir.mkdir(exist_ok=True)
+    # Write the compiled .md to a temp file (pandoc reads from disk)
+    compiled_path = exports_dir / f"{safe_title}-manuscript.md"
+    compiled_path.write_text(compiled, encoding="utf-8")
+    if fmt in ("md", "html", "txt"):
+        if fmt == "md":
+            return compiled.encode("utf-8"), "md", "text/markdown"
+        if fmt == "txt":
+            txt = re.sub(r"^#{1,6}\s+", "", compiled, flags=re.MULTILINE)
+            txt = re.sub(r"\*\*(.+?)\*\*", r"\1", txt)
+            txt = re.sub(r"\*(.+?)\*", r"\1", txt)
+            txt = re.sub(r"\[(.+?)\]\(.+?\)", r"\1", txt)
+            return txt.encode("utf-8"), "txt", "text/plain"
         if fmt == "html":
-            attachment_bytes = (f"# {title}\n\nby {author}\n\n\n" + compiled).encode("utf-8")
-        else:
-            attachment_bytes = (text_body or "").encode("utf-8")
-        safe_title = re.sub(r"[^A-Za-z0-9._-]+", "_", title).strip("_") or "book"
-        send_args["attachments"] = [
-            {"filename": f"{safe_title}.md", "content": attachment_bytes}
+            try:
+                html_body = build_html_document(title, author, markdown_to_html(compiled), ctx)
+            except Exception:
+                return None, None, None
+            return html_body.encode("utf-8"), "html", "text/html"
+    # PDF / EPUB / DOCX / RTF — use pandoc
+    pandoc_target = exports_dir / f"{safe_title}-manuscript.{fmt}"
+    try:
+        # We mirror the export pipeline: build pandoc args with metadata
+        meta_lines = [
+            f"--metadata=title:{title}",
         ]
-    if dry_run:
-        # Don't actually send — return what would be sent.
-        return {
-            "ok": True,
-            "dry_run": True,
-            "would_send_to": to,
-            "subject": subject,
-            "attachment_filename": f"{safe_title}.md" if include_attachments else None,
-            "book": {
-                "title": title,
-                "author": author,
-                "words": word_count,
-                "format": fmt,
-                "size_bytes": len((text_body or html_body or "").encode("utf-8")),
-            },
-        }
-    result = _agentmail.send_email(**send_args)
-    if not result.get("ok"):
-        return result, 500
-    result["book"] = {
-        "title": title,
-        "author": author,
-        "words": word_count,
-        "format": fmt,
-        "size_bytes": len((text_body or html_body or "").encode("utf-8")),
-    }
+        if author:
+            meta_lines.append(f"--metadata=author:{author}")
+        cmd = ["pandoc", str(compiled_path), "-o", str(pandoc_target)] + meta_lines
+        proc = subprocess.run(cmd, capture_output=True, timeout=120)
+        if proc.returncode != 0:
+            return None, None, None
+        return pandoc_target.read_bytes(), fmt, "application/octet-stream"
+    except Exception:
+        return None, None, None
+
+
+@app.route("/api/projects/<project_id>/email-zip", methods=["POST"])
+def email_zip(project_id):
+    """Failsafe: email a zip bundle of the project (all .md files + manifest).
+
+    Body: {"to": "...", "dry_run": bool, "include_body": bool}
+
+    The body is a short note. The zip is the same content as the
+    /export/bundle endpoint, sent as an attachment.
+    """
+    if not _agentmail.is_available():
+        return {"error": _agentmail.last_error() or "AgentMail unavailable"}, 503
+    data = safe_json()
+    to = data.get("to")
+    if not to:
+        return {"error": "to is required"}, 400
+    result = email_zip_inner(project_id, to=to, dry_run=bool(data.get("dry_run", False)))
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], int):
+        return result
     return result
 
 

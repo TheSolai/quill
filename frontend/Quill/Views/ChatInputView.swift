@@ -23,6 +23,11 @@ struct ChatInputView: NSViewRepresentable {
     let placeholderColor: NSColor
     /// When this changes, focus is requested.
     var focusToken: Int = 0
+    /// Called when the user presses Tab. Receives the current input text
+    /// and a callback to invoke with the fixed text. The caller is
+    /// responsible for the actual AI call (typically via BackendService.editFix).
+    /// If nil, Tab is a no-op (default text-field behaviour).
+    var onTabFix: ((String, @escaping (String) -> Void) -> Void)? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSTextView.scrollableTextView()
@@ -39,6 +44,9 @@ struct ChatInputView: NSViewRepresentable {
         context.coordinator.textView = textView
         textView.onSend = { [weak coordinator = context.coordinator] in
             coordinator?.handleSend()
+        }
+        textView.onTabFix = { [weak coordinator = context.coordinator] in
+            coordinator?.handleTabFix()
         }
         configureTextView(textView, coordinator: context.coordinator)
         textView.string = text
@@ -102,6 +110,7 @@ struct ChatInputView: NSViewRepresentable {
         var placeholder: String = ""
         var placeholderColor: NSColor = .secondaryLabelColor
         private var isInternalUpdate = false
+        private var isFixing = false
 
         init(parent: ChatInputView) {
             self.parent = parent
@@ -119,35 +128,81 @@ struct ChatInputView: NSViewRepresentable {
         func handleSend() {
             parent.onSend()
         }
+
+        @MainActor
+        func handleTabFix() {
+            guard !isFixing else { return }
+            let snippet = parent.text
+            let trimmed = snippet.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            guard let onTabFix = parent.onTabFix else { return }
+            guard let textView = textView else { return }
+            isFixing = true
+            // Show a brief "fixing" indicator by changing the cursor briefly.
+            let originalSpellingState = textView.isContinuousSpellCheckingEnabled
+            textView.isContinuousSpellCheckingEnabled = false
+            // Insert a subtle hint into the input so the user knows
+            // something is happening. We show "…" as a suffix marker.
+            let appendHint = " …"
+            let ns = textView.string
+            textView.string = ns + appendHint
+            parent.text = textView.string
+            onTabFix(snippet) { [weak self] fixed in
+                guard let self = self, let textView = self.textView else { return }
+                let cleaned = fixed.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Strip our " …" marker if it's still there
+                let finalText: String
+                if textView.string.hasSuffix(appendHint) {
+                    finalText = String(textView.string.dropLast(appendHint.count)) + cleaned
+                } else {
+                    finalText = cleaned
+                }
+                textView.string = finalText
+                self.parent.text = finalText
+                textView.isContinuousSpellCheckingEnabled = originalSpellingState
+                self.isFixing = false
+            }
+        }
     }
 }
 
 // MARK: - ChatInputTextView (NSTextView subclass)
 //
-// Intercepts Return and Shift+Return:
+// Intercepts Return, Shift+Return, and Tab:
 //   - Return (no modifiers) → fires onSend
 //   - Shift+Return → inserts a newline
+//   - Tab (no modifiers) → fires onTabFix (AI inline fix)
+//   - Shift+Tab / Cmd+Tab / Option+Tab → passed through (focus traversal,
+//     emoji picker, etc.)
 // Cmd+A / Cmd+C / Cmd+V are passed through to super (default NSTextView).
 
 class ChatInputTextView: NSTextView {
     var onSend: (() -> Void)?
+    var onTabFix: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
-        // Return key (keyCode 36) — send if no modifiers, insert newline if Shift held
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Return key (keyCode 36) — send if no modifiers, newline if Shift held
         if event.keyCode == 36 {
-            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if mods.contains(.shift) {
-                // Insert a literal newline
                 super.insertText("\n", replacementRange: selectedRange())
                 return
             }
             if mods.contains(.command) || mods.contains(.option) || mods.contains(.control) {
-                // Let Cmd+Return / Option+Return etc. behave as usual
                 super.keyDown(with: event)
                 return
             }
-            // Plain Return — send
             onSend?()
+            return
+        }
+        // Tab key (keyCode 48) — AI inline fix if no modifiers
+        if event.keyCode == 48 && onTabFix != nil {
+            if mods.contains(.shift) || mods.contains(.command) || mods.contains(.option) || mods.contains(.control) {
+                // Let Shift+Tab / Cmd+Tab etc. behave as usual (focus traversal, etc.)
+                super.keyDown(with: event)
+                return
+            }
+            onTabFix?()
             return
         }
         super.keyDown(with: event)

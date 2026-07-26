@@ -178,7 +178,7 @@ struct AIAssistantView: View {
                             text: $inputText,
                             placeholder: generationMode == .long
                                 ? "Write a chapter, continue, or research... (type / for commands)"
-                                : "Ask a question, brainstorm... (type / for commands)",
+                                : "Ask a question, brainstorm... (type / for commands, Tab to fix)",
                             isDisabled: state.isStreaming,
                             onSend: send,
                             font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
@@ -186,7 +186,8 @@ struct AIAssistantView: View {
                             background: NSColor(bg.opacity(0.5)),
                             border: NSColor(border),
                             placeholderColor: NSColor(textMuted),
-                            focusToken: chatFocusToken
+                            focusToken: chatFocusToken,
+                            onTabFix: handleTabFix
                         )
                         .frame(minHeight: 38, maxHeight: 100)
                         .overlay(
@@ -380,6 +381,31 @@ struct AIAssistantView: View {
         state.statusMessage = "Applied to chapter"
         // Persist immediately (user clicked a button, not waiting for autosave)
         Task { await state.saveNow() }
+    }
+
+    // MARK: - Tab-to-fix inline AI
+    //
+    // Same idea as the editor's Tab-to-fix: take the current chat
+    // input, send it to the /api/edit-fix endpoint with a "fix typos
+    // and grammar" instruction, and replace the input with the
+    // corrected version. Shift+Tab / Cmd+Tab pass through to the OS
+    // (handled in ChatInputTextView.keyDown).
+
+    private func handleTabFix(snippet: String, completion: @escaping (String) -> Void) {
+        Task { @MainActor in
+            do {
+                let result = try await BackendService.shared.editFix(
+                    text: snippet,
+                    instruction: "fix typos and grammar",
+                    slotId: nil
+                )
+                completion(result.text)
+            } catch {
+                // On error, just put the original text back (no harm)
+                completion(snippet)
+                state.statusMessage = "Tab-fix failed: \(error.localizedDescription)"
+            }
+        }
     }
 }
 

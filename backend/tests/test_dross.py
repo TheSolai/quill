@@ -370,7 +370,8 @@ class TestDrossSystemPrompt:
         mock_instance = MagicMock()
         mock_instance.chat.return_value = "should not be called"
         mock_instance.stream.return_value = iter(["should not be called"])
-        with patch.dict(PROVIDERS, {"minimax": MagicMock(return_value=mock_instance)}):
+        with patch.dict(PROVIDERS, {"minimax": MagicMock(return_value=mock_instance)}), \
+             patch("agentmail_service.send_email", return_value={"ok": True, "message_id": "fake"}):
             client.post("/api/slots/minimax-text/activate")
             r = client.post("/api/chat", json={
                 "project_id": pid,
@@ -379,10 +380,14 @@ class TestDrossSystemPrompt:
             })
             # The model should NOT be called — intent was caught
             assert mock_instance.chat.called is False
-            # And we got an email result
+            # And we got an email result. Either the new "mail" key
+            # (mail-the-X intent) or the legacy "email" key (generic
+            # email intent) is acceptable. NOTE: the response key is
+            # one of these — but the dispatcher is mocked-out below so
+            # no real email is sent.
             d = r.get_json()
             # Either email succeeded, was rate-limited, or failed for a benign reason
-            assert "email" in d or "rate" in str(d).lower() or "ok" in d
+            assert "email" in d or "mail" in d or "rate" in str(d).lower() or "ok" in d
 
 
 if __name__ == "__main__":
