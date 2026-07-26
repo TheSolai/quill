@@ -466,7 +466,7 @@ func printUsage(subcommand: String? = nil) {
             ("inbox reply ID", "reply to an email"),
         ]),
         ("Failsafe", [
-            ("mail-book --to you@x.com", "bundle the project and email it (panic button)"),
+            ("mail-book --to you@x.com",  "bundle the project and email it (panic button)"),
         ]),
         ("External", [
             ("search \"q\"",   "web search via DuckDuckGo"),
@@ -484,7 +484,7 @@ func printUsage(subcommand: String? = nil) {
     for (g, items) in groups {
         out("  " + paint(g.uppercased(), .yellow, .bold))
         for (cmd, desc) in items {
-            let padded = cmd.padding(toLength: 22, withPad: " ", startingAt: 0)
+            let padded = cmd.padding(toLength: 26, withPad: " ", startingAt: 0)
             out("    " + cyan(padded) + dim(desc))
         }
     }
